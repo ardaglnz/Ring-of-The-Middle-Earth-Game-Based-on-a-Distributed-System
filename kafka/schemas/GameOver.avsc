@@ -1,0 +1,12 @@
+﻿{
+  "type": "record",
+  "name": "GameOver",
+  "namespace": "rotr.avro",
+  "doc": "Produced with enable.idempotence=true. Exactly once in game.broadcast.",
+  "fields": [
+    {"name": "winner",    "type": "string"},
+    {"name": "cause",     "type": "string"},
+    {"name": "turn",      "type": "int"},
+    {"name": "timestamp", "type": "long"}
+  ]
+}

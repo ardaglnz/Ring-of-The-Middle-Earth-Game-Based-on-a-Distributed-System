@@ -1,0 +1,11 @@
+﻿{
+  "type": "record",
+  "name": "RingBearerSpotted",
+  "namespace": "rotr.avro",
+  "doc": "Dark Side only. Emitted when Ring Bearer crosses a path with surveillanceLevel>=1.",
+  "fields": [
+    {"name": "pathId",    "type": "string"},
+    {"name": "turn",      "type": "int"},
+    {"name": "timestamp", "type": "long"}
+  ]
+}

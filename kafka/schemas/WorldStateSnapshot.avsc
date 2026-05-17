@@ -1,0 +1,12 @@
+﻿{
+  "type": "record",
+  "name": "WorldStateSnapshot",
+  "namespace": "rotr.avro",
+  "doc": "Delivered to both sides via game.broadcast. ring-bearer.currentRegion stripped for Dark Side.",
+  "fields": [
+    {"name": "turn",      "type": "int"},
+    {"name": "regions",   "type": {"type": "array", "items": "string"}},
+    {"name": "units",     "type": {"type": "array", "items": "string"}},
+    {"name": "timestamp", "type": "long"}
+  ]
+}

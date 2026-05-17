@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ring of the Middle Earth — Distributed Strategy Game</title>
+  <meta name="description" content="A browser-based distributed strategy game. Two players battle across Middle Earth — Light Side escorts the Ring Bearer to Mount Doom, Dark Side hunts them down." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&family=Crimson+Text:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- Login Screen -->
+  <div id="login-screen" class="screen active">
+    <div class="login-bg"></div>
+    <div class="login-card glass">
+      <div class="eye-of-sauron"></div>
+      <h1 class="title-main">Ring of the Middle Earth</h1>
+      <p class="subtitle">A Distributed Strategy Game</p>
+      <div class="side-select">
+        <button id="btn-light-side" class="btn-side light-side" onclick="chooseSide('light')">
+          <span class="side-icon">⚔️</span>
+          <span>Light Side</span>
+          <small>Guide the Ring Bearer</small>
+        </button>
+        <button id="btn-dark-side" class="btn-side dark-side" onclick="chooseSide('dark')">
+          <span class="side-icon">👁️</span>
+          <span>Dark Side</span>
+          <small>Hunt the Ring Bearer</small>
+        </button>
+      </div>
+      <div class="server-config">
+        <label>Server URL</label>
+        <input id="server-url" type="text" value="http://localhost:8080" class="input-field" />
+        <input id="player-id" type="text" placeholder="Player ID (e.g. light-player1)" class="input-field" />
+        <button id="btn-connect" class="btn-primary" onclick="connect()">Connect &amp; Join Game</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Game Screen -->
+  <div id="game-screen" class="screen">
+    <header class="game-header glass">
+      <div class="header-left">
+        <h2 id="side-label" class="side-label">—</h2>
+        <span id="player-label" class="player-label"></span>
+      </div>
+      <div class="header-center">
+        <div class="turn-display">
+          <span class="turn-label">TURN</span>
+          <span id="turn-number" class="turn-number">1</span>
+          <span class="turn-max">/ 40</span>
+        </div>
+        <div id="timer-bar-wrap">
+          <div id="timer-bar" class="timer-bar"></div>
+        </div>
+      </div>
+      <div class="header-right">
+        <div id="status-dot" class="status-dot connecting"></div>
+        <span id="status-label" class="status-label">Connecting…</span>
+        <button class="btn-icon" onclick="requestAnalysis()" title="Show Analysis">🔮</button>
+      </div>
+    </header>
+
+    <div class="game-body">
+      <!-- Left Panel: Units -->
+      <aside class="panel units-panel glass">
+        <h3 class="panel-title">⚔️ Units</h3>
+        <div id="units-list" class="units-list"></div>
+      </aside>
+
+      <!-- Map -->
+      <main class="map-area">
+        <div class="map-container" id="map-container">
+          <object id="map-svg" data="../MiddleEarthMap.svg" type="image/svg+xml" class="map-svg"></object>
+          <canvas id="map-canvas" class="map-canvas"></canvas>
+          <div id="unit-markers" class="unit-markers"></div>
+        </div>
+        <div id="event-log" class="event-log glass">
+          <h4>📜 Event Log</h4>
+          <div id="event-entries"></div>
+        </div>
+      </main>
+
+      <!-- Right Panel: Orders & Analysis -->
+      <aside class="panel orders-panel glass">
+        <h3 class="panel-title">📋 Orders</h3>
+        <div id="selected-unit-info" class="selected-unit-info">
+          <p class="muted">Select a unit to issue orders</p>
+        </div>
+        <div id="order-form" class="order-form hidden">
+          <div class="form-group">
+            <label>Selected Unit</label>
+            <div id="sel-unit-name" class="info-value"></div>
+          </div>
+          <div class="form-group">
+            <label>Order Type</label>
+            <select id="order-type" class="input-field" onchange="onOrderTypeChange()"></select>
+          </div>
+          <div id="order-params" class="order-params"></div>
+          <button class="btn-primary" onclick="submitOrder()">Submit Order</button>
+        </div>
+
+        <div class="divider"></div>
+
+        <h3 class="panel-title">🔮 Analysis</h3>
+        <div id="analysis-panel" class="analysis-panel">
+          <p class="muted" id="analysis-placeholder">Click 🔮 to run analysis</p>
+          <div id="analysis-content" class="hidden"></div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- Toast notifications -->
+    <div id="toast-area" class="toast-area"></div>
+
+    <!-- Win/Loss overlay -->
+    <div id="game-over-overlay" class="game-over-overlay hidden">
+      <div class="game-over-card glass">
+        <div id="game-over-icon" class="game-over-icon"></div>
+        <h2 id="game-over-title"></h2>
+        <p id="game-over-desc"></p>
+        <button class="btn-primary" onclick="location.reload()">Play Again</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="game.js"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+﻿{
+  "type": "record",
+  "name": "RingBearerMoved",
+  "namespace": "rotr.avro",
+  "doc": "Sent only to game.ring.position — consumed by Light Side SSE only.",
+  "fields": [
+    {"name": "trueRegion", "type": "string"},
+    {"name": "turn",       "type": "int"},
+    {"name": "timestamp",  "type": "long"}
+  ]
+}

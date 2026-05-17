@@ -1,0 +1,13 @@
+﻿{
+  "type": "record",
+  "name": "PathStatusChanged",
+  "namespace": "rotr.avro",
+  "fields": [
+    {"name": "pathId",           "type": "string"},
+    {"name": "newStatus",        "type": "string"},
+    {"name": "surveillanceLevel","type": "int"},
+    {"name": "tempOpenTurns",    "type": "int"},
+    {"name": "turn",             "type": "int"},
+    {"name": "timestamp",        "type": "long"}
+  ]
+}

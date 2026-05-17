@@ -1,0 +1,11 @@
+﻿{
+  "type": "record",
+  "name": "RingBearerDetected",
+  "namespace": "rotr.avro",
+  "doc": "Dark Side only. Carries true region when Nazgul detects Ring Bearer.",
+  "fields": [
+    {"name": "regionId",  "type": "string"},
+    {"name": "turn",      "type": "int"},
+    {"name": "timestamp", "type": "long"}
+  ]
+}

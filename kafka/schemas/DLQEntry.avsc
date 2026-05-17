@@ -1,0 +1,15 @@
+﻿{
+  "type": "record",
+  "name": "DLQEntry",
+  "namespace": "rotr.avro",
+  "doc": "Dead-letter queue entry for invalid orders.",
+  "fields": [
+    {"name": "originalTopic", "type": "string"},
+    {"name": "partition",     "type": "int"},
+    {"name": "offset",        "type": "long"},
+    {"name": "errorCode",     "type": "string"},
+    {"name": "errorMessage",  "type": "string"},
+    {"name": "rawPayload",    "type": "bytes"},
+    {"name": "timestamp",     "type": "long"}
+  ]
+}

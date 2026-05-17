@@ -1,0 +1,14 @@
+{
+  "type": "record",
+  "name": "OrderSubmitted",
+  "namespace": "rotr.avro",
+  "doc": "Raw order submitted by a player. game.orders.raw topic.",
+  "fields": [
+    {"name": "playerId",  "type": "string"},
+    {"name": "unitId",    "type": "string"},
+    {"name": "orderType", "type": "string"},
+    {"name": "payload",   "type": "bytes"},
+    {"name": "turn",      "type": "int"},
+    {"name": "timestamp", "type": "long"}
+  ]
+}

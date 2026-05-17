@@ -1,0 +1,192 @@
+version: '3.8'
+
+# Ring of the Middle Earth — Docker Compose
+# Starts: 3 Kafka brokers, Zookeeper, Confluent Schema Registry, 3 Go game instances
+
+services:
+
+  # ---- Zookeeper ----
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-log:/var/lib/zookeeper/log
+
+  # ---- Kafka Broker 1 ----
+  kafka-1:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-1
+    depends_on: [zookeeper]
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_ENABLE_IDEMPOTENCE: 'true'
+    volumes:
+      - kafka-1-data:/var/lib/kafka/data
+
+  # ---- Kafka Broker 2 ----
+  kafka-2:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-2
+    depends_on: [zookeeper]
+    ports:
+      - "9093:9093"
+    environment:
+      KAFKA_BROKER_ID: 2
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:29093,PLAINTEXT_HOST://localhost:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+    volumes:
+      - kafka-2-data:/var/lib/kafka/data
+
+  # ---- Kafka Broker 3 ----
+  kafka-3:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-3
+    depends_on: [zookeeper]
+    ports:
+      - "9094:9094"
+    environment:
+      KAFKA_BROKER_ID: 3
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:29094,PLAINTEXT_HOST://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+    volumes:
+      - kafka-3-data:/var/lib/kafka/data
+
+  # ---- Confluent Schema Registry ----
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.5.0
+    container_name: schema-registry
+    depends_on: [kafka-1, kafka-2, kafka-3]
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka-1:29092,kafka-2:29093,kafka-3:29094
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+
+  # ---- Kafka Topic Initialiser ----
+  # Creates all 10 required topics with correct configs.
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-init
+    depends_on: [kafka-1, kafka-2, kafka-3]
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "
+      echo 'Waiting for Kafka brokers...'
+      sleep 15
+      kafka-topics --bootstrap-server kafka-1:29092 --create --if-not-exists --topic game.orders.raw       --partitions 3 --replication-factor 3 --config cleanup.policy=delete  --config retention.ms=3600000
+      kafka-topics --bootstrap-server kafka-1:29092 --create --if-not-exists --topic game.orders.validated --partitions 6 --replication-factor 3 --config cleanup.policy=delete  --config retention.ms=3600000
+      kafka-topics --bootstrap-server kafka-1:29092 --create --if-not-exists --topic game.events.unit     --partitions 6 --replication-factor 3 --config cleanup.policy=delete  --config retention.ms=604800000
+      kafka-topics --bootstrap-server kafka-1:29092 --create --if-not-exists --topic game.events.region   --partitions 6 --replication-factor 3 --config cleanup.policy=delete  --config retention.ms=604800000
+      kafka-topics --bootstrap-server kafka-1:29092 --create --if-not-exists --topic game.events.path     --partitions 6 --replication-factor 3 --config cleanup.policy=delete  --config retention.ms=604800000
+      kafka-topics --bootstrap-server kafka-1:29092 --create --if-not-exists --topic game.session         --partitions 1 --replication-factor 3 --config cleanup.policy=compact
+      kafka-topics --bootstrap-server kafka-1:29092 --create --if-not-exists --topic game.broadcast       --partitions 1 --replication-factor 3 --config cleanup.policy=delete  --config retention.ms=3600000
+      kafka-topics --bootstrap-server kafka-1:29092 --create --if-not-exists --topic game.ring.position   --partitions 1 --replication-factor 3 --config cleanup.policy=delete  --config retention.ms=3600000
+      kafka-topics --bootstrap-server kafka-1:29092 --create --if-not-exists --topic game.ring.detection  --partitions 2 --replication-factor 3 --config cleanup.policy=delete  --config retention.ms=3600000
+      kafka-topics --bootstrap-server kafka-1:29092 --create --if-not-exists --topic game.dlq             --partitions 3 --replication-factor 3 --config cleanup.policy=delete  --config retention.ms=604800000
+      echo 'All 10 topics created.'
+      kafka-topics --bootstrap-server kafka-1:29092 --describe
+      "
+
+  # ---- Go Game Instance 1 ----
+  go-1:
+    build:
+      context: ./option-b
+      dockerfile: Dockerfile
+    container_name: go-1
+    depends_on: [schema-registry, kafka-init]
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      KAFKA_BROKERS: "kafka-1:29092,kafka-2:29093,kafka-3:29094"
+      SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      CONFIG_DIR: "/app/config"
+      INSTANCE_ID: "go-1"
+    volumes:
+      - ./config:/app/config:ro
+
+  # ---- Go Game Instance 2 ----
+  go-2:
+    build:
+      context: ./option-b
+      dockerfile: Dockerfile
+    container_name: go-2
+    depends_on: [schema-registry, kafka-init]
+    ports:
+      - "8082:8080"
+    environment:
+      PORT: "8080"
+      KAFKA_BROKERS: "kafka-1:29092,kafka-2:29093,kafka-3:29094"
+      SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      CONFIG_DIR: "/app/config"
+      INSTANCE_ID: "go-2"
+    volumes:
+      - ./config:/app/config:ro
+
+  # ---- Go Game Instance 3 ----
+  go-3:
+    build:
+      context: ./option-b
+      dockerfile: Dockerfile
+    container_name: go-3
+    depends_on: [schema-registry, kafka-init]
+    ports:
+      - "8083:8080"
+    environment:
+      PORT: "8080"
+      KAFKA_BROKERS: "kafka-1:29092,kafka-2:29093,kafka-3:29094"
+      SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      CONFIG_DIR: "/app/config"
+      INSTANCE_ID: "go-3"
+    volumes:
+      - ./config:/app/config:ro
+
+  # ---- nginx Load Balancer (optional, routes :80 → go-1/2/3) ----
+  nginx:
+    image: nginx:alpine
+    container_name: nginx-lb
+    depends_on: [go-1, go-2, go-3]
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ui:/usr/share/nginx/html:ro
+
+volumes:
+  zookeeper-data:
+  zookeeper-log:
+  kafka-1-data:
+  kafka-2-data:
+  kafka-3-data:

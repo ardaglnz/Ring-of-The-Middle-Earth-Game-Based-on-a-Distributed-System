@@ -1,0 +1,16 @@
+{
+  "type": "record",
+  "name": "OrderValidated",
+  "namespace": "rotr.avro",
+  "doc": "V2 — adds nullable routeRiskScore for schema evolution demo. Backward compatible with V1 consumers.",
+  "fields": [
+    {"name": "playerId",       "type": "string"},
+    {"name": "unitId",         "type": "string"},
+    {"name": "orderType",      "type": "string"},
+    {"name": "payload",        "type": "bytes"},
+    {"name": "turn",           "type": "int"},
+    {"name": "timestamp",      "type": "long"},
+    {"name": "routeRiskScore", "type": ["null", "int"], "default": null,
+     "doc": "Schema evolution V2 field. null if not a route order. Computed by Topology 2."}
+  ]
+}

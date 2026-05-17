@@ -1,0 +1,14 @@
+{
+  "type": "record",
+  "name": "OrderValidated",
+  "namespace": "rotr.avro",
+  "doc": "V1 — validated order without routeRiskScore. game.orders.validated topic.",
+  "fields": [
+    {"name": "playerId",  "type": "string"},
+    {"name": "unitId",    "type": "string"},
+    {"name": "orderType", "type": "string"},
+    {"name": "payload",   "type": "bytes"},
+    {"name": "turn",      "type": "int"},
+    {"name": "timestamp", "type": "long"}
+  ]
+}

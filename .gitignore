@@ -1,0 +1,32 @@
+# --- Go (Option-B) ---
+# Derlenmiş binary dosyaları ve test çıktıları
+option-b/main
+option-b/main.exe
+*.exe
+*.test
+*.out
+*.prof
+
+# --- Docker & Lokal Data ---
+# Eğer docker-compose lokal data oluşturuyorsa
+data/
+logs/
+kafka-data/
+zk-data/
+
+# --- İşletim Sistemi Kalıntıları ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- IDE ve Editörler ---
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- AI Araç Kalıntıları ---
+.antigravity/
+.cline/
+.cursor/
+.aider*
