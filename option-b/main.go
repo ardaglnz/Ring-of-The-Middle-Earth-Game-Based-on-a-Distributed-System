@@ -84,6 +84,14 @@ func main() {
 	mux := http.NewServeMux()
 	srv.RegisterRoutes(mux)
 
+	// Serve static UI files from the ui/ directory.
+	uiDir := filepath.Join(configDir, "..", "ui")
+	if _, err := os.Stat(uiDir); err == nil {
+		log.Printf("[main] Serving static UI from %s", uiDir)
+		fs := http.FileServer(http.Dir(uiDir))
+		mux.Handle("/", fs)
+	}
+
 	// HTTP server goroutine.
 	port := os.Getenv("PORT")
 	if port == "" {

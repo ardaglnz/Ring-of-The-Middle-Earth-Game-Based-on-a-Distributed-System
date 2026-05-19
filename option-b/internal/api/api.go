@@ -16,6 +16,7 @@ import (
 
 	"github.com/rotr/option-b/internal/cache"
 	"github.com/rotr/option-b/internal/config"
+	"github.com/rotr/option-b/internal/engine"
 	"github.com/rotr/option-b/internal/graph"
 	"github.com/rotr/option-b/internal/pipeline"
 	"github.com/rotr/option-b/internal/router"
@@ -44,6 +45,27 @@ type Server struct {
 
 	turnTicker *time.Ticker
 	signalCh   chan os.Signal
+
+	// Pending orders for the current turn.
+	pendingOrders []pendingOrder
+	orderMu       sync.Mutex
+
+	fastForwardVotes map[string]int
+	ffMu             sync.Mutex
+	forceTurnCh      chan struct{}
+}
+
+type pendingOrder struct {
+	OrderType string          `json:"orderType"`
+	PlayerID  string          `json:"playerId"`
+	UnitID    string          `json:"unitId"`
+	Turn      int             `json:"turn"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	PathIds   []string        `json:"pathIds,omitempty"`
+	NewPathIds []string       `json:"newPathIds,omitempty"`
+	PathId    string          `json:"pathId,omitempty"`
+	TargetRegion string       `json:"targetRegion,omitempty"`
+	TargetPathId string       `json:"targetPathId,omitempty"`
 }
 
 type sseConn struct {
@@ -55,6 +77,20 @@ type sseConn struct {
 type analysisReq struct {
 	side     config.Side
 	resultCh chan interface{}
+}
+
+// cors wraps an http.HandlerFunc with CORS headers.
+func cors(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next(w, r)
+	}
 }
 
 // New creates a Server.
@@ -79,19 +115,22 @@ func New(
 		disconnectCh:      make(chan sseConn, 10),
 		analysisRequestCh: make(chan analysisReq, 10),
 		signalCh:          make(chan os.Signal, 1),
+		fastForwardVotes:  make(map[string]int),
+		forceTurnCh:       make(chan struct{}, 1),
 	}
 }
 
 // RegisterRoutes attaches all HTTP handlers.
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/game/start", s.handleGameStart)
-	mux.HandleFunc("/order", s.handleOrder)
-	mux.HandleFunc("/game/state", s.handleGameState)
-	mux.HandleFunc("/orders/available", s.handleOrdersAvailable)
-	mux.HandleFunc("/analysis/routes", s.handleAnalysisRoutes)
-	mux.HandleFunc("/analysis/intercept", s.handleAnalysisIntercept)
-	mux.HandleFunc("/events", s.handleSSE)
-	mux.HandleFunc("/health", s.handleHealth)
+	mux.HandleFunc("/game/start", cors(s.handleGameStart))
+	mux.HandleFunc("/order", cors(s.handleOrder))
+	mux.HandleFunc("/game/state", cors(s.handleGameState))
+	mux.HandleFunc("/orders/available", cors(s.handleOrdersAvailable))
+	mux.HandleFunc("/analysis/routes", cors(s.handleAnalysisRoutes))
+	mux.HandleFunc("/analysis/intercept", cors(s.handleAnalysisIntercept))
+	mux.HandleFunc("/game/fast-forward", cors(s.handleFastForward))
+	mux.HandleFunc("/events", cors(s.handleSSE))
+	mux.HandleFunc("/health", cors(s.handleHealth))
 }
 
 // Run starts the main select loop (Section 31). All 7 cases handled.
@@ -102,9 +141,13 @@ func (s *Server) Run(ctx context.Context) {
 
 	for {
 		select {
-		// Case 1: Kafka consumer messages from various topics.
+		// Case 1a: Light side SSE events.
 		case msg := <-s.lightSideSSECh:
 			s.broadcastToClients(s.lightClients, msg.Payload)
+
+		// Case 1b: Dark side SSE events.
+		case msg := <-s.darkSideSSECh:
+			s.broadcastToClients(s.darkClients, msg.Payload)
 
 		// Case 2: New SSE connection.
 		case conn := <-s.newConnectionCh:
@@ -122,9 +165,14 @@ func (s *Server) Run(ctx context.Context) {
 		case update := <-s.cacheUpdateCh:
 			s.applyUpdate(update)
 
-		// Case 6: Turn tick.
-		case tick := <-s.turnTicker.C:
-			log.Printf("[api] Turn tick at %v", tick)
+		// Case 6: Turn tick — process orders and broadcast state.
+		case <-s.turnTicker.C:
+			s.processTurnTick()
+
+		// Case 6.5: Fast Forward forced tick
+		case <-s.forceTurnCh:
+			s.turnTicker.Reset(time.Duration(s.gameConfig.TurnDurationSeconds) * time.Second)
+			s.processTurnTick()
 
 		// Case 7: OS signal — graceful shutdown.
 		case sig := <-s.signalCh:
@@ -169,10 +217,120 @@ func (s *Server) broadcastToClients(clients map[string]chan []byte, payload []by
 }
 
 func (s *Server) applyUpdate(event router.Event) {
-	// Cache updates from broadcast events are applied here.
-	// In production these come from Kafka and update the WorldStateCache.
 	log.Printf("[api] Cache update from topic %s", event.Topic)
 }
+
+// processTurnTick collects pending orders, runs the engine, and broadcasts updated state.
+func (s *Server) processTurnTick() {
+	s.orderMu.Lock()
+	pending := s.pendingOrders
+	s.pendingOrders = nil
+	s.orderMu.Unlock()
+
+	snap := s.cache.Snapshot()
+	if snap.GameOver {
+		return
+	}
+
+	// Convert pending orders to engine orders.
+	var engineOrders []engine.Order
+	for _, po := range pending {
+		engineOrders = append(engineOrders, engine.Order{
+			PlayerID:  po.PlayerID,
+			UnitID:    po.UnitID,
+			OrderType: po.OrderType,
+			Turn:      po.Turn,
+			Payload:   po.Payload,
+		})
+	}
+
+	log.Printf("[api] Processing turn %d with %d orders", snap.Turn, len(engineOrders))
+
+	// Build turn processor and run.
+	emitter := newEmitter(s)
+	tp := engine.New(s.cache, s.graph, s.gameConfig, emitter)
+	tp.ProcessTurn(engineOrders)
+
+	// Broadcast updated state to all SSE clients.
+	s.broadcastWorldState()
+}
+
+// broadcastWorldState sends the current WorldStateSnapshot to all connected SSE clients.
+func (s *Server) broadcastWorldState() {
+	snap := s.cache.Snapshot()
+
+	// Build light side state (includes ring bearer true region).
+	lightData := s.buildStateForSide(snap, true)
+	s.broadcastToClients(s.lightClients, lightData)
+
+	// Build dark side state (ring bearer region stripped).
+	darkData := s.buildStateForSide(snap, false)
+	s.broadcastToClients(s.darkClients, darkData)
+}
+
+func (s *Server) buildStateForSide(snap cache.WorldStateCache, isLight bool) []byte {
+	type UnitJ struct {
+		ID            string `json:"id"`
+		Name          string `json:"name"`
+		Class         string `json:"class"`
+		Side          string `json:"side"`
+		CurrentRegion string `json:"currentRegion"`
+		Strength      int    `json:"strength"`
+		Status        string `json:"status"`
+	}
+	type StateJ struct {
+		Turn  int     `json:"turn"`
+		Units []UnitJ `json:"units"`
+	}
+	st := StateJ{Turn: snap.Turn}
+	for id, u := range snap.Units {
+		region := u.Region
+		if u.Config.Class == config.ClassRingBearer {
+			if isLight {
+				region = snap.RingBearer.TrueRegion
+			} else {
+				region = ""
+			}
+		}
+		st.Units = append(st.Units, UnitJ{
+			ID: id, Name: u.Config.Name, Class: string(u.Config.Class),
+			Side: string(u.Config.Side), CurrentRegion: region,
+			Strength: u.Strength, Status: string(u.Status),
+		})
+	}
+	b, _ := json.Marshal(st)
+	return b
+}
+
+// Simple mock producer for local mode.
+type mockProd struct{}
+func (m *mockProd) Produce(topic string, key []byte, value []byte) error { return nil }
+func (m *mockProd) ProduceExactlyOnce(topic string, key []byte, value []byte) error { return nil }
+func (m *mockProd) Close() {}
+
+type localEmitter struct{ p engine.EventEmitter }
+
+func newEmitter(s *Server) engine.EventEmitter {
+	return &localEmitterImpl{s: s}
+}
+
+type localEmitterImpl struct{ s *Server }
+func (e *localEmitterImpl) EmitUnitEvent(t string, p interface{}) error { return nil }
+func (e *localEmitterImpl) EmitRegionEvent(t string, p interface{}) error { return nil }
+func (e *localEmitterImpl) EmitPathEvent(t string, p interface{}) error { return nil }
+func (e *localEmitterImpl) EmitBroadcast(p interface{}) error { return nil }
+func (e *localEmitterImpl) EmitRingPosition(p interface{}) error {
+	b, _ := json.Marshal(p)
+	e.s.broadcastToClients(e.s.lightClients, b)
+	return nil
+}
+func (e *localEmitterImpl) EmitRingDetection(id string, p interface{}) error {
+	b, _ := json.Marshal(p)
+	e.s.broadcastToClients(e.s.darkClients, b)
+	return nil
+}
+func (e *localEmitterImpl) EmitGameOver(w, c string, t int) error { return nil }
+func (e *localEmitterImpl) EmitDLQ(ec, em string, rp []byte) error { return nil }
 
 func (s *Server) handleAnalysisRequest(req analysisReq) {
 	snap := s.cache.Snapshot()
@@ -196,8 +354,58 @@ func (s *Server) handleGameStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	s.cache.Update(func(c *cache.WorldStateCache) {
+		c.Turn = 1
+	})
+	log.Println("[api] Game started — HVH mode, turn 1")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "started", "mode": "HVH"})
+}
+
+func (s *Server) handleFastForward(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		PlayerID string `json:"playerId"`
+		Turn     int    `json:"turn"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	s.ffMu.Lock()
+	defer s.ffMu.Unlock()
+
+	// Clear old votes if the turn has advanced
+	if s.cache.Turn > req.Turn {
+		s.fastForwardVotes = make(map[string]int)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	s.fastForwardVotes[req.PlayerID] = req.Turn
+
+	// Check if both players voted for this turn
+	votes := 0
+	for _, t := range s.fastForwardVotes {
+		if t == req.Turn {
+			votes++
+		}
+	}
+
+	if votes >= 2 {
+		log.Printf("[api] Fast forward triggered for turn %d", req.Turn)
+		s.fastForwardVotes = make(map[string]int) // reset
+		select {
+		case s.forceTurnCh <- struct{}{}:
+		default:
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) handleOrder(w http.ResponseWriter, r *http.Request) {
@@ -205,7 +413,19 @@ func (s *Server) handleOrder(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// Accept and forward to Kafka — returns 202 Accepted.
+
+	var order pendingOrder
+	if err := json.NewDecoder(r.Body).Decode(&order); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	s.orderMu.Lock()
+	s.pendingOrders = append(s.pendingOrders, order)
+	s.orderMu.Unlock()
+
+	log.Printf("[api] Order received: %s for unit %s (turn %d)", order.OrderType, order.UnitID, order.Turn)
+
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
 }
@@ -214,46 +434,60 @@ func (s *Server) handleGameState(w http.ResponseWriter, r *http.Request) {
 	playerID := r.URL.Query().Get("playerId")
 	snap := s.cache.Snapshot()
 
-	// Ring Bearer region stripped for Dark Side — enforced in router, also here.
-	type Out struct {
-		Turn    int                            `json:"turn"`
-		Units   map[string]map[string]interface{} `json:"units"`
-		Regions map[string]interface{}         `json:"regions"`
+	type UnitOut struct {
+		ID            string `json:"id"`
+		Name          string `json:"name"`
+		Class         string `json:"class"`
+		Side          string `json:"side"`
+		CurrentRegion string `json:"currentRegion"`
+		Strength      int    `json:"strength"`
+		Status        string `json:"status"`
 	}
-
-	out := Out{
-		Turn:    snap.Turn,
-		Units:   make(map[string]map[string]interface{}),
-		Regions: make(map[string]interface{}),
+	type RegionOut struct {
+		ID           string `json:"id"`
+		ControlledBy string `json:"controlledBy"`
+		ThreatLevel  int    `json:"threatLevel"`
+		Fortified    bool   `json:"fortified"`
+	}
+	type Out struct {
+		Turn    int         `json:"turn"`
+		Units   []UnitOut   `json:"units"`
+		Regions []RegionOut `json:"regions"`
 	}
 
 	// Determine player side from playerID prefix.
 	isLightSide := len(playerID) > 5 && playerID[:6] == "light-"
 
+	out := Out{Turn: snap.Turn}
+
 	for id, u := range snap.Units {
 		region := u.Region
-		// Config-driven: RingBearer class → region hidden from Dark Side.
-		if u.Config.Class == config.ClassRingBearer && !isLightSide {
-			region = "" // NEVER expose true region to Dark Side
+		// For RingBearer: light side sees true region from private state, dark side sees ""
+		if u.Config.Class == config.ClassRingBearer {
+			if isLightSide {
+				region = snap.RingBearer.TrueRegion
+			} else {
+				region = ""
+			}
 		}
-		out.Units[id] = map[string]interface{}{
-			"id":            u.ID,
-			"name":          u.Config.Name,
-			"class":         u.Config.Class,
-			"side":          u.Config.Side,
-			"currentRegion": region,
-			"strength":      u.Strength,
-			"status":        u.Status,
-		}
+		out.Units = append(out.Units, UnitOut{
+			ID:            id,
+			Name:          u.Config.Name,
+			Class:         string(u.Config.Class),
+			Side:          string(u.Config.Side),
+			CurrentRegion: region,
+			Strength:      u.Strength,
+			Status:        string(u.Status),
+		})
 	}
 
 	for id, reg := range snap.Regions {
-		out.Regions[id] = map[string]interface{}{
-			"id":           id,
-			"controlledBy": reg.ControlledBy,
-			"threatLevel":  reg.ThreatLevel,
-			"fortified":    reg.Fortified,
-		}
+		out.Regions = append(out.Regions, RegionOut{
+			ID:           id,
+			ControlledBy: string(reg.ControlledBy),
+			ThreatLevel:  reg.ThreatLevel,
+			Fortified:    reg.Fortified,
+		})
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -338,6 +572,10 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "SSE not supported", http.StatusInternalServerError)
 		return
 	}
+
+	// Send an initial comment to trigger onopen on the client and flush headers
+	fmt.Fprintf(w, ": connected\n\n")
+	flusher.Flush()
 
 	ch := make(chan []byte, 32)
 	conn := sseConn{playerID: playerID, side: side, ch: ch}

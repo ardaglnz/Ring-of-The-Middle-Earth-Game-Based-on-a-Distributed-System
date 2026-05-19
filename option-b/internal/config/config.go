@@ -170,14 +170,15 @@ func LoadGameConfig(path string) (*GameConfig, error) {
 		}
 
 		if inUnit {
+			parseUnitField(&cur, line)
 			// End of unit
 			if strings.Contains(line, "}") {
-				cfg.Units[cur.ID] = cur
+				if cur.ID != "" {
+					cfg.Units[cur.ID] = cur
+				}
 				inUnit = false
 				cur = UnitConfig{}
-				continue
 			}
-			parseUnitField(&cur, line)
 		}
 	}
 
@@ -185,52 +186,92 @@ func LoadGameConfig(path string) (*GameConfig, error) {
 }
 
 func parseUnitField(u *UnitConfig, line string) {
-	// Remove trailing comma/brace
-	line = strings.TrimRight(line, ", ")
-	kv := strings.SplitN(line, "=", 2)
-	if len(kv) != 2 {
-		return
-	}
-	key := strings.TrimSpace(kv[0])
-	val := strings.TrimSpace(kv[1])
-	val = strings.Trim(val, "\"")
+	// Remove closing brace if present
+	line = strings.TrimRight(line, " }")
+	// Smart split: split on commas that are NOT inside quotes or brackets.
+	parts := smartSplit(line)
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		kv := strings.SplitN(part, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(kv[0])
+		val := strings.TrimSpace(kv[1])
+		val = strings.Trim(val, "\"")
 
-	switch key {
-	case "id":
-		u.ID = val
-	case "name":
-		u.Name = val
-	case "class":
-		u.Class = UnitClass(val)
-	case "side":
-		u.Side = Side(val)
-	case "start":
-		u.StartRegion = val
-	case "strength":
-		u.Strength, _ = strconv.Atoi(val)
-	case "leadership":
-		u.Leadership = val == "true"
-	case "leadershipBonus":
-		u.LeadershipBonus, _ = strconv.Atoi(val)
-	case "indestructible":
-		u.Indestructible = val == "true"
-	case "detectionRange":
-		u.DetectionRange, _ = strconv.Atoi(val)
-	case "respawns":
-		u.Respawns = val == "true"
-	case "respawnTurns":
-		u.RespawnTurns, _ = strconv.Atoi(val)
-	case "maia":
-		u.Maia = val == "true"
-	case "maiaAbilityPaths":
-		u.MaiaAbilityPaths = parsePaths(val)
-	case "ignoresFortress":
-		u.IgnoresFortress = val == "true"
-	case "canFortify":
-		u.CanFortify = val == "true"
-	case "cooldown":
-		u.Cooldown, _ = strconv.Atoi(val)
+		switch key {
+		case "id":
+			u.ID = val
+		case "name":
+			u.Name = val
+		case "class":
+			u.Class = UnitClass(val)
+		case "side":
+			u.Side = Side(val)
+		case "start":
+			u.StartRegion = val
+		case "strength":
+			u.Strength, _ = strconv.Atoi(val)
+		case "leadership":
+			u.Leadership = val == "true"
+		case "leadershipBonus":
+			u.LeadershipBonus, _ = strconv.Atoi(val)
+		case "indestructible":
+			u.Indestructible = val == "true"
+		case "detectionRange":
+			u.DetectionRange, _ = strconv.Atoi(val)
+		case "respawns":
+			u.Respawns = val == "true"
+		case "respawnTurns":
+			u.RespawnTurns, _ = strconv.Atoi(val)
+		case "maia":
+			u.Maia = val == "true"
+		case "maiaAbilityPaths":
+			u.MaiaAbilityPaths = parsePaths(val)
+		case "ignoresFortress":
+			u.IgnoresFortress = val == "true"
+		case "canFortify":
+			u.CanFortify = val == "true"
+		case "cooldown":
+			u.Cooldown, _ = strconv.Atoi(val)
+		}
 	}
+}
+
+// smartSplit splits a string by commas, but respects quoted strings and brackets.
+func smartSplit(s string) []string {
+	var parts []string
+	var current strings.Builder
+	inQuotes := false
+	bracketDepth := 0
+
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case ch == '"':
+			inQuotes = !inQuotes
+			current.WriteByte(ch)
+		case ch == '[' && !inQuotes:
+			bracketDepth++
+			current.WriteByte(ch)
+		case ch == ']' && !inQuotes:
+			bracketDepth--
+			current.WriteByte(ch)
+		case ch == ',' && !inQuotes && bracketDepth == 0:
+			parts = append(parts, current.String())
+			current.Reset()
+		default:
+			current.WriteByte(ch)
+		}
+	}
+	if current.Len() > 0 {
+		parts = append(parts, current.String())
+	}
+	return parts
 }
 
 func parsePaths(val string) []string {

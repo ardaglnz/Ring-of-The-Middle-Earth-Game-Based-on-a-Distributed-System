@@ -16,6 +16,14 @@ const state = {
   eventSource: null,
   timerInterval: null,
   timerRemaining: 60,
+  hasSubmittedOrder: false,
+  builtRoute: [],
+  zoomLevel: 1,
+  panX: 0,
+  panY: 0,
+  isPanning: false,
+  startX: 0,
+  startY: 0,
 };
 
 // ===================== SIDE SELECTION =====================
@@ -32,7 +40,49 @@ function chooseSide(side) {
 }
 
 // ===================== CONNECTION =====================
-function connect() {
+// ===================== CONNECTION =====================
+function showHowToPlayModal() {
+  const modal = document.getElementById('how-to-play-modal');
+  const victoryDesc = document.getElementById('how-to-play-victory-desc');
+  
+  if (state.side === 'light') {
+    victoryDesc.innerHTML = 'Guide <strong>Frodo Baggins (the Ring Bearer)</strong> safely from The Shire to <strong>Mount Doom</strong> before Turn 40 to destroy the One Ring. Maintain secrecy — the Shadow player cannot see Frodo\'s true position unless he is detected!';
+  } else {
+    victoryDesc.innerHTML = 'Hunt down the Ring Bearer! Deploy the Nazgul and Saruman\'s armies, block paths, search regions, and defeat the Light Side guards to capture the Ring before Turn 40.';
+  }
+  
+  modal.classList.remove('hidden');
+}
+
+async function closeHowToPlayModal() {
+  document.getElementById('how-to-play-modal').classList.add('hidden');
+  
+  // Show game screen.
+  document.getElementById('login-screen').classList.remove('active');
+  document.getElementById('game-screen').classList.add('active');
+
+  updateSideLabel();
+  setStatus('connecting');
+
+  // Start the game on the server.
+  try {
+    await fetch(`${state.serverURL}/game/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'HVH' }),
+    });
+  } catch (e) {
+    // Server might not be running — continue with demo mode.
+  }
+
+  // Connect SSE.
+  connectSSE();
+
+  // Fetch initial state.
+  fetchGameState();
+}
+
+async function connect() {
   const url = document.getElementById('server-url').value.trim();
   const pid = document.getElementById('player-id').value.trim();
 
@@ -42,18 +92,8 @@ function connect() {
   state.serverURL = url;
   state.playerID = pid;
 
-  // Show game screen.
-  document.getElementById('login-screen').classList.remove('active');
-  document.getElementById('game-screen').classList.add('active');
-
-  updateSideLabel();
-  setStatus('connecting');
-
-  // Connect SSE.
-  connectSSE();
-
-  // Fetch initial state.
-  fetchGameState();
+  // Show how to play popup before entering.
+  showHowToPlayModal();
 }
 
 function connectSSE() {
@@ -113,8 +153,31 @@ async function fetchGameState() {
 
 function updateWorldState(data) {
   if (data.turn !== undefined) {
+    if (data.turn !== state.turn) {
+      state.hasSubmittedOrder = false;
+      state.builtRoute = []; // clear route builder on new turn
+      const btn = document.getElementById('btn-fast-forward');
+      if (btn) {
+        btn.disabled = false;
+        btn.style.opacity = '1';
+        btn.title = "Fast Forward Turn";
+      }
+    }
     state.turn = data.turn;
     document.getElementById('turn-number').textContent = data.turn;
+    
+    // Update turn-side badge dynamically.
+    const sideBadge = document.getElementById('turn-side-badge');
+    if (sideBadge) {
+      if (data.turn <= 2) {
+        sideBadge.textContent = "Setup Phase — Both Sides Planning";
+      } else {
+        sideBadge.textContent = "Simultaneous Turn Phase — Both Sides Active";
+      }
+    }
+    
+    // Update player planning status.
+    updatePlayerPlanningStatus();
   }
   if (data.units) {
     if (Array.isArray(data.units)) {
@@ -133,6 +196,19 @@ function updateWorldState(data) {
   renderUnits();
   renderMapMarkers();
   startTurnTimer();
+}
+
+function updatePlayerPlanningStatus() {
+  const statusBadge = document.getElementById('player-turn-status');
+  if (statusBadge) {
+    if (state.hasSubmittedOrder) {
+      statusBadge.textContent = "WAITING FOR OPPONENT... ⏳";
+      statusBadge.className = "player-turn-status ready";
+    } else {
+      statusBadge.textContent = "YOUR TURN TO PLAN (Simultaneous) ✍️";
+      statusBadge.className = "player-turn-status planning";
+    }
+  }
 }
 
 // Demo state when server is not running.
@@ -215,7 +291,22 @@ async function selectUnit(unitID) {
   const card = document.getElementById(`unit-card-${unitID}`);
   if (card) card.classList.add('selected');
 
-  // Show order form.
+  // Check if it's an enemy unit
+  const isEnemy = (state.side === 'light' && u.side === 'SHADOW') || 
+                  (state.side === 'dark' && u.side === 'FREE_PEOPLES');
+
+  if (isEnemy) {
+    document.getElementById('order-form').classList.add('hidden');
+    document.getElementById('selected-unit-info').classList.remove('hidden');
+    document.getElementById('selected-unit-info').innerHTML = `
+      <p style="color: var(--crimson-bright); font-weight: bold;">Enemy Unit</p>
+      <p>${u.name} (${u.strength}⚔️)</p>
+      <p class="muted">You cannot issue orders to the opponent's forces.</p>
+    `;
+    return;
+  }
+
+  // Show order form for own unit.
   document.getElementById('selected-unit-info').classList.add('hidden');
   const form = document.getElementById('order-form');
   form.classList.remove('hidden');
@@ -259,21 +350,122 @@ function formatOrderName(o) {
 function onOrderTypeChange() {
   const orderType = document.getElementById('order-type').value;
   const params = document.getElementById('order-params');
+  const u = state.units[state.selectedUnitID];
+  if (!u) return;
 
-  const paramTemplates = {
-    'ASSIGN_ROUTE':    '<label>Path IDs (comma-separated)</label><input id="param-pathIds" class="input-field" placeholder="shire-to-bree,bree-to-weathertop" />',
-    'REDIRECT_UNIT':   '<label>New Path IDs (comma-separated)</label><input id="param-newPathIds" class="input-field" placeholder="shire-to-tharbad,tharbad-to-fords-of-isen" />',
-    'BLOCK_PATH':      '<label>Path ID</label><input id="param-pathId" class="input-field" placeholder="lothlorien-to-emyn-muil" />',
-    'SEARCH_PATH':     '<label>Path ID</label><input id="param-pathId" class="input-field" placeholder="bree-to-weathertop" />',
-    'ATTACK_REGION':   '<label>Target Region ID</label><input id="param-targetRegion" class="input-field" placeholder="isengard" />',
-    'REINFORCE_REGION':'<label>Target Region ID</label><input id="param-targetRegion" class="input-field" placeholder="edoras" />',
-    'MAIA_ABILITY':    '<label>Target Path ID</label><input id="param-targetPathId" class="input-field" placeholder="fords-of-isen-to-edoras" />',
-    'DEPLOY_NAZGUL':   '<label>Target Region ID</label><input id="param-targetRegion" class="input-field" placeholder="bree" />',
-    'FORTIFY_REGION':  '<p class="muted">Fortifies current region. No params needed.</p>',
-    'DESTROY_RING':    '<p class="muted">Destroys the Ring at Mount Doom. No params needed.</p>',
-  };
+  params.innerHTML = ''; // Clear params
 
-  params.innerHTML = paramTemplates[orderType] || '';
+  if (orderType === 'ASSIGN_ROUTE' || orderType === 'REDIRECT_UNIT') {
+    state.builtRoute = [];
+    renderRouteBuilder(orderType, u);
+  } else if (orderType === 'BLOCK_PATH' || orderType === 'SEARCH_PATH') {
+    // Filter paths connected to current region
+    const connectedPaths = ALL_PATHS.filter(p => p.from === u.currentRegion || p.to === u.currentRegion);
+    let options = connectedPaths.map(p => {
+      const nextRegId = p.from === u.currentRegion ? p.to : p.from;
+      const nextRegName = ALL_REGIONS.find(r => r.id === nextRegId)?.name || nextRegId;
+      return `<option value="${p.id}">➡️ ${nextRegName}</option>`;
+    }).join('');
+    if (connectedPaths.length === 0) {
+      options = ALL_PATHS.map(p => `<option value="${p.id}">${p.id}</option>`).join('');
+    }
+    params.innerHTML = `
+      <div class="form-group">
+        <label>Select Connected Path</label>
+        <select id="param-pathId" class="input-field" onchange="highlightCurrentTarget()">
+          <option value="" disabled selected>Select a path...</option>
+          ${options}
+        </select>
+      </div>
+    `;
+  } else if (orderType === 'MAIA_ABILITY') {
+    let maiaAbilityPaths = [];
+    if (u.id === 'saruman') {
+      maiaAbilityPaths = ["fangorn-to-isengard", "helms-deep-to-isengard", "fords-of-isen-to-isengard", "tharbad-to-fords-of-isen", "fords-of-isen-to-edoras"];
+    }
+    let options = "";
+    if (maiaAbilityPaths.length > 0) {
+      options = maiaAbilityPaths.map(pid => {
+        const path = ALL_PATHS.find(p => p.id === pid) || { from: "?", to: "?" };
+        const nextRegId = path.from === u.currentRegion ? path.to : path.from;
+        const nextRegName = ALL_REGIONS.find(r => r.id === nextRegId)?.name || nextRegId;
+        return `<option value="${pid}">➡️ ${nextRegName} (${pid})</option>`;
+      }).join('');
+    } else {
+      options = ALL_PATHS.map(p => {
+        const nextRegId = p.from === u.currentRegion ? p.to : p.from;
+        const nextRegName = ALL_REGIONS.find(r => r.id === nextRegId)?.name || nextRegId;
+        return `<option value="${p.id}">➡️ ${nextRegName} (${p.id})</option>`;
+      }).join('');
+    }
+    params.innerHTML = `
+      <div class="form-group">
+        <label>Select Target Path</label>
+        <select id="param-targetPathId" class="input-field" onchange="highlightCurrentTarget()">
+          <option value="" disabled selected>Select a path...</option>
+          ${options}
+        </select>
+      </div>
+    `;
+  } else if (orderType === 'ATTACK_REGION' || orderType === 'REINFORCE_REGION' || orderType === 'DEPLOY_NAZGUL') {
+    const options = ALL_REGIONS.map(r => `<option value="${r.id}">${r.name}</option>`).join('');
+    params.innerHTML = `
+      <div class="form-group">
+        <label>Select Target Region</label>
+        <select id="param-targetRegion" class="input-field" onchange="highlightCurrentTarget()">
+          <option value="" disabled selected>Select a region...</option>
+          ${options}
+        </select>
+      </div>
+    `;
+  } else if (orderType === 'FORTIFY_REGION') {
+    params.innerHTML = '<p class="muted">Fortifies current region. No params needed.</p>';
+    highlightRegion(u.currentRegion);
+  } else if (orderType === 'DESTROY_RING') {
+    params.innerHTML = '<p class="muted">Destroys the Ring at Mount Doom. No params needed.</p>';
+    highlightRegion('mount-doom');
+  }
+
+  // Clear previous highlights and trigger initial highlight if needed
+  if (orderType !== 'FORTIFY_REGION' && orderType !== 'DESTROY_RING') {
+    clearHighlights();
+  }
+}
+
+// ===================== ROUTE BUILDER HELPERS =====================
+function getAdjacentPaths(regionId) {
+  if (!regionId) return [];
+  return ALL_PATHS.filter(p => p.from === regionId || p.to === regionId).map(p => {
+    const nextRegion = p.from === regionId ? p.to : p.from;
+    const nextRegionName = ALL_REGIONS.find(r => r.id === nextRegion)?.name || nextRegion;
+    return {
+      pathId: p.id,
+      nextRegion: nextRegion,
+      nextRegionName: nextRegionName
+    };
+  });
+}
+
+function renderRouteBuilder(orderType, u) {
+  const params = document.getElementById('order-params');
+  let currentRegion = u.currentRegion;
+  if (u.class === 'RingBearer' && !currentRegion) {
+    currentRegion = 'the-shire';
+  }
+
+  const adj = getAdjacentPaths(currentRegion);
+  const selectOptions = adj.map(a => `<option value="${a.pathId}">➡️ ${a.nextRegionName}</option>`).join('');
+
+  params.innerHTML = `
+    <div class="form-group" style="margin-top: 0.5rem;">
+      <label>Next Path from ${ALL_REGIONS.find(r => r.id === currentRegion)?.name || currentRegion}</label>
+      <select id="${orderType === 'ASSIGN_ROUTE' ? 'param-pathIds' : 'param-newPathIds'}" class="input-field" onchange="highlightCurrentTarget()">
+        <option value="" disabled selected>Select destination...</option>
+        ${selectOptions || '<option value="" disabled>No paths available</option>'}
+      </select>
+      <div style="margin-top:0.5rem; font-size:0.8rem; color:#aaa;">(Only one move allowed per turn)</div>
+    </div>
+  `;
 }
 
 // ===================== SUBMIT ORDER =====================
@@ -301,6 +493,8 @@ async function submitOrder() {
     if (res.status === 202) {
       showToast(`Order submitted: ${formatOrderName(orderType)}`, 'success');
       logEvent(`📤 ${state.units[state.selectedUnitID]?.name}: ${formatOrderName(orderType)}`, 'movement');
+      state.hasSubmittedOrder = true;
+      updatePlayerPlanningStatus();
     } else {
       const err = await res.json().catch(() => ({}));
       showToast(`Order rejected: ${err.errorCode || res.status}`, 'error');
@@ -308,6 +502,29 @@ async function submitOrder() {
   } catch (e) {
     showToast('Demo mode — order noted locally', 'info');
     logEvent(`📤 ${state.units[state.selectedUnitID]?.name}: ${formatOrderName(orderType)} (demo)`, 'movement');
+    state.hasSubmittedOrder = true;
+    updatePlayerPlanningStatus();
+  }
+}
+
+// ===================== FAST FORWARD =====================
+async function requestFastForward() {
+  const btn = document.getElementById('btn-fast-forward');
+  if (btn) {
+    btn.disabled = true;
+    btn.style.opacity = '0.5';
+    btn.title = "Waiting for opponent to fast forward...";
+  }
+  
+  try {
+    await fetch(`${state.serverURL}/game/fast-forward`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ playerId: state.playerID, turn: state.turn })
+    });
+    showToast("Fast forward requested. Waiting for opponent...", "info");
+  } catch (e) {
+    showToast("Server not responding for fast forward", "error");
   }
 }
 
@@ -417,6 +634,72 @@ const REGION_POSITIONS = {
   'mount-doom':    { x: 82, y: 78 },
 };
 
+// Dynamic data constants for path selection and routing.
+const ALL_REGIONS = [
+  { id: "the-shire", name: "The Shire" },
+  { id: "bree", name: "Bree" },
+  { id: "tharbad", name: "Tharbad" },
+  { id: "weathertop", name: "Weathertop" },
+  { id: "rivendell", name: "Rivendell" },
+  { id: "fangorn", name: "Fangorn" },
+  { id: "fords-of-isen", name: "Fords of Isen" },
+  { id: "rohan-plains", name: "Rohan Plains" },
+  { id: "moria", name: "Moria" },
+  { id: "helms-deep", name: "Helm's Deep" },
+  { id: "isengard", name: "Isengard" },
+  { id: "edoras", name: "Edoras" },
+  { id: "lothlorien", name: "Lothlórien" },
+  { id: "dead-marshes", name: "Dead Marshes" },
+  { id: "emyn-muil", name: "Emyn Muil" },
+  { id: "minas-tirith", name: "Minas Tirith" },
+  { id: "ithilien", name: "Ithilien" },
+  { id: "osgiliath", name: "Osgiliath" },
+  { id: "minas-morgul", name: "Minas Morgul" },
+  { id: "cirith-ungol", name: "Cirith Ungol" },
+  { id: "mordor", name: "Mordor" },
+  { id: "mount-doom", name: "Mount Doom" }
+];
+
+const ALL_PATHS = [
+  { id: "shire-to-bree",              from: "the-shire",    to: "bree" },
+  { id: "bree-to-weathertop",         from: "bree",         to: "weathertop" },
+  { id: "bree-to-rivendell",          from: "bree",         to: "rivendell" },
+  { id: "bree-to-tharbad",            from: "bree",         to: "tharbad" },
+  { id: "shire-to-tharbad",           from: "the-shire",    to: "tharbad" },
+  { id: "weathertop-to-rivendell",    from: "weathertop",   to: "rivendell" },
+  { id: "rivendell-to-moria",         from: "rivendell",    to: "moria" },
+  { id: "rivendell-to-lothlorien",    from: "rivendell",    to: "lothlorien" },
+  { id: "moria-to-lothlorien",        from: "moria",        to: "lothlorien" },
+  { id: "lothlorien-to-emyn-muil",    from: "lothlorien",   to: "emyn-muil" },
+  { id: "lothlorien-to-rohan-plains", from: "lothlorien",   to: "rohan-plains" },
+  { id: "rohan-plains-to-fangorn",    from: "rohan-plains", to: "fangorn" },
+  { id: "rohan-plains-to-edoras",     from: "rohan-plains", to: "edoras" },
+  { id: "rohan-plains-to-minas-tirith",from: "rohan-plains",to: "minas-tirith" },
+  { id: "fangorn-to-isengard",        from: "fangorn",      to: "isengard" },
+  { id: "isengard-to-rohan-plains",   from: "isengard",     to: "rohan-plains" },
+  { id: "tharbad-to-fords-of-isen",   from: "tharbad",      to: "fords-of-isen" },
+  { id: "fords-of-isen-to-isengard",  from: "fords-of-isen",to: "isengard" },
+  { id: "fords-of-isen-to-helms-deep",from: "fords-of-isen",to: "helms-deep" },
+  { id: "fords-of-isen-to-edoras",    from: "fords-of-isen",to: "edoras" },
+  { id: "edoras-to-helms-deep",       from: "edoras",       to: "helms-deep" },
+  { id: "helms-deep-to-isengard",     from: "helms-deep",   to: "isengard" },
+  { id: "edoras-to-minas-tirith",     from: "edoras",       to: "minas-tirith" },
+  { id: "emyn-muil-to-dead-marshes",  from: "emyn-muil",    to: "dead-marshes" },
+  { id: "emyn-muil-to-ithilien",      from: "emyn-muil",    to: "ithilien" },
+  { id: "dead-marshes-to-ithilien",   from: "dead-marshes", to: "ithilien" },
+  { id: "dead-marshes-to-mordor",     from: "dead-marshes", to: "mordor" },
+  { id: "ithilien-to-minas-tirith",   from: "ithilien",     to: "minas-tirith" },
+  { id: "ithilien-to-osgiliath",      from: "ithilien",     to: "osgiliath" },
+  { id: "ithilien-to-cirith-ungol",   from: "ithilien",     to: "cirith-ungol" },
+  { id: "minas-tirith-to-osgiliath",  from: "minas-tirith", to: "osgiliath" },
+  { id: "osgiliath-to-minas-morgul",  from: "osgiliath",    to: "minas-morgul" },
+  { id: "minas-morgul-to-cirith-ungol",from: "minas-morgul",to: "cirith-ungol" },
+  { id: "minas-morgul-to-mordor",     from: "minas-morgul", to: "mordor" },
+  { id: "cirith-ungol-to-mordor",     from: "cirith-ungol", to: "mordor" },
+  { id: "cirith-ungol-to-mount-doom", from: "cirith-ungol", to: "mount-doom" },
+  { id: "mordor-to-mount-doom",       from: "mordor",       to: "mount-doom" }
+];
+
 function renderMapMarkers() {
   const container = document.getElementById('unit-markers');
   container.innerHTML = '';
@@ -438,12 +721,26 @@ function renderMapMarkers() {
       const isLight = u.side === 'FREE_PEOPLES';
       marker.className = `unit-marker ${isRingBearer ? 'ring-bearer' : isLight ? 'light' : 'dark'}`;
 
-      const offsetX = (i % 3) * 14 - 14;
-      const offsetY = Math.floor(i / 3) * 14;
-      marker.style.left = `${pos.x + offsetX / 5}%`;
-      marker.style.top  = `${pos.y + offsetY / 5}%`;
+      // Calculate a pixel offset so markers don't overlap.
+      // E.g., center the cluster by shifting left based on count, and wrap around
+      const cols = Math.min(units.length, 3);
+      const row = Math.floor(i / 3);
+      const col = i % 3;
+      
+      const offsetX = (col - (cols - 1) / 2) * 26; // 26px apart horizontally
+      const offsetY = row * 26; // 26px apart vertically
+
+      marker.style.left = `calc(${pos.x}% + ${offsetX}px)`;
+      marker.style.top  = `calc(${pos.y}% + ${offsetY}px)`;
+      
       marker.title = `${u.name} (${u.strength}⚔️)`;
       marker.textContent = isRingBearer ? '💍' : (isLight ? '⚔' : '👁');
+
+      const label = document.createElement('div');
+      label.className = 'marker-label';
+      label.textContent = u.name;
+      marker.appendChild(label);
+
       marker.addEventListener('click', () => selectUnit(u.id));
       container.appendChild(marker);
     });
@@ -536,3 +833,101 @@ function showToast(msg, type = 'info') {
   area.appendChild(t);
   setTimeout(() => t.remove(), 4000);
 }
+
+// ===================== MAP CONTROLS =====================
+function setupMapControls() {
+  const container = document.getElementById('map-container');
+  if (!container) return;
+
+  container.addEventListener('mousedown', (e) => {
+    // Only drag with left click and when not clicking on a button or marker
+    if (e.button !== 0 || e.target.closest('button') || e.target.closest('.unit-marker')) return;
+    state.isPanning = true;
+    state.startX = e.clientX - state.panX;
+    state.startY = e.clientY - state.panY;
+    container.style.cursor = 'grabbing';
+  });
+
+  window.addEventListener('mouseup', () => {
+    state.isPanning = false;
+    container.style.cursor = 'default';
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!state.isPanning) return;
+    e.preventDefault();
+    state.panX = e.clientX - state.startX;
+    state.panY = e.clientY - state.startY;
+    updateMapTransform();
+  });
+
+  container.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const zoomDelta = e.deltaY < 0 ? 0.1 : -0.1;
+    zoomMap(zoomDelta);
+  });
+}
+
+function zoomMap(delta) {
+  state.zoomLevel = Math.max(0.5, Math.min(3, state.zoomLevel + delta));
+  updateMapTransform();
+}
+
+function resetMap() {
+  state.zoomLevel = 1;
+  state.panX = 0;
+  state.panY = 0;
+  updateMapTransform();
+}
+
+function updateMapTransform() {
+  const wrapper = document.getElementById('map-wrapper');
+  if (wrapper) {
+    wrapper.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoomLevel})`;
+  }
+}
+
+// ===================== HIGHLIGHTS =====================
+function clearHighlights() {
+  document.querySelectorAll('.target-highlight').forEach(el => el.remove());
+}
+
+function highlightRegion(regionId) {
+  const pos = REGION_POSITIONS[regionId];
+  if (!pos) return;
+  const container = document.getElementById('unit-markers');
+  const hl = document.createElement('div');
+  hl.className = 'target-highlight';
+  hl.style.left = `${pos.x}%`;
+  hl.style.top = `${pos.y}%`;
+  container.appendChild(hl);
+}
+
+function highlightPath(pathId) {
+  const path = ALL_PATHS.find(p => p.id === pathId);
+  if (!path) return;
+  highlightRegion(path.from);
+  highlightRegion(path.to);
+}
+
+function highlightCurrentTarget() {
+  clearHighlights();
+  const orderType = document.getElementById('order-type').value;
+  
+  if (orderType === 'ATTACK_REGION' || orderType === 'REINFORCE_REGION' || orderType === 'DEPLOY_NAZGUL') {
+    const el = document.getElementById('param-targetRegion');
+    if (el && el.value) highlightRegion(el.value);
+  } else if (orderType === 'BLOCK_PATH' || orderType === 'SEARCH_PATH') {
+    const el = document.getElementById('param-pathId');
+    if (el && el.value) highlightPath(el.value);
+  } else if (orderType === 'MAIA_ABILITY') {
+    const el = document.getElementById('param-targetPathId');
+    if (el && el.value) highlightPath(el.value);
+  } else if (orderType === 'ASSIGN_ROUTE' || orderType === 'REDIRECT_UNIT') {
+    const el = document.getElementById(orderType === 'ASSIGN_ROUTE' ? 'param-pathIds' : 'param-newPathIds');
+    if (el && el.value) highlightPath(el.value);
+  }
+}
+
+// Initialize map controls on load
+document.addEventListener('DOMContentLoaded', setupMapControls);

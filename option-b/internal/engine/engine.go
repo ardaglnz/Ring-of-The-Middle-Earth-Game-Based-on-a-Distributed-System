@@ -250,6 +250,21 @@ func (tp *TurnProcessor) applyBlockPath(c *cache.WorldStateCache, o Order) {
 	if u.Region != path.Config.From && u.Region != path.Config.To {
 		return
 	}
+
+	// Rule: A FellowshipGuard stationed at a path endpoint prevents a Nazgul from permanently blocking that path.
+	guardPresent := false
+	for _, unit := range c.Units {
+		if unit.Config.Class == config.ClassFellowshipGuard && unit.Status == cache.UnitActive {
+			if unit.Region == path.Config.From || unit.Region == path.Config.To {
+				guardPresent = true
+				break
+			}
+		}
+	}
+	if guardPresent {
+		return // Block fails because of the guard
+	}
+
 	path.Status = cache.StatusBlocked
 	path.BlockedByUnit = o.UnitID
 	c.Paths[p.PathID] = path
@@ -419,7 +434,13 @@ func (tp *TurnProcessor) autoAdvance(c *cache.WorldStateCache, turn int) {
 				log.Printf("[engine] RingBearerSpotted on path %s (turn %d)", nextPathID, turn)
 			}
 			c.RingBearer = rb
-			// RingBearerMoved emitted to game.ring.position (Light Side only) — done by emitter.
+			// RingBearerMoved emitted to game.ring.position (Light Side only)
+			tp.emitter.EmitRingPosition(map[string]interface{}{
+				"type":       "RingBearerMoved",
+				"trueRegion": dest,
+				"turn":       turn,
+				"timestamp":  time.Now().UnixMilli(),
+			})
 		}
 
 		if u.RouteIdx >= len(u.Route) {
@@ -606,6 +627,14 @@ func (tp *TurnProcessor) runDetection(c *cache.WorldStateCache, turn int) {
 		// c.DarkView.RingBearerRegion is NEVER set — always "".
 
 		log.Printf("[engine] RingBearerDetected at %s (turn %d)", result.TrueRegion, turn)
+
+		// Emit detection event to Dark Side
+		tp.emitter.EmitRingDetection("dark-side-player", map[string]interface{}{
+			"type":      "RingBearerDetected",
+			"regionId":  result.TrueRegion,
+			"turn":      turn,
+			"timestamp": time.Now().UnixMilli(),
+		})
 	}
 }
 

@@ -51,6 +51,8 @@
           <span class="turn-label">TURN</span>
           <span id="turn-number" class="turn-number">1</span>
           <span class="turn-max">/ 40</span>
+          <div id="turn-side-badge" class="turn-side-badge">Free Peoples &amp; Shadow Phase</div>
+          <div id="player-turn-status" class="player-turn-status planning">Planning ✍️</div>
         </div>
         <div id="timer-bar-wrap">
           <div id="timer-bar" class="timer-bar"></div>
@@ -59,6 +61,7 @@
       <div class="header-right">
         <div id="status-dot" class="status-dot connecting"></div>
         <span id="status-label" class="status-label">Connecting…</span>
+        <button id="btn-fast-forward" class="btn-icon" onclick="requestFastForward()" title="Fast Forward Turn">⏩</button>
         <button class="btn-icon" onclick="requestAnalysis()" title="Show Analysis">🔮</button>
       </div>
     </header>
@@ -73,9 +76,16 @@
       <!-- Map -->
       <main class="map-area">
         <div class="map-container" id="map-container">
-          <object id="map-svg" data="../MiddleEarthMap.svg" type="image/svg+xml" class="map-svg"></object>
-          <canvas id="map-canvas" class="map-canvas"></canvas>
-          <div id="unit-markers" class="unit-markers"></div>
+          <div class="map-wrapper" id="map-wrapper">
+            <object id="map-svg" data="MiddleEarthMap.svg?v=2" type="image/svg+xml" class="map-svg"></object>
+            <canvas id="map-canvas" class="map-canvas"></canvas>
+            <div id="unit-markers" class="unit-markers"></div>
+          </div>
+          <div class="map-controls glass">
+            <button class="btn-icon" onclick="zoomMap(0.2)" title="Zoom In">➕</button>
+            <button class="btn-icon" onclick="resetMap()" title="Reset View">🏠</button>
+            <button class="btn-icon" onclick="zoomMap(-0.2)" title="Zoom Out">➖</button>
+          </div>
         </div>
         <div id="event-log" class="event-log glass">
           <h4>📜 Event Log</h4>
@@ -123,6 +133,37 @@
         <p id="game-over-desc"></p>
         <button class="btn-primary" onclick="location.reload()">Play Again</button>
       </div>
+    </div>
+
+    </div>
+  </div>
+
+  <!-- How to Play Popup Modal -->
+  <div id="how-to-play-modal" class="how-to-play-overlay hidden">
+    <div class="how-to-play-card glass">
+      <div class="how-to-play-header">
+        <h2 class="title-main" style="font-size: 1.8rem;">How to Play</h2>
+        <p class="subtitle" style="margin-top: 0.2rem;">Read these ancient scrolls before entering battle</p>
+      </div>
+      <div class="how-to-play-content">
+        <div class="how-to-play-section">
+          <h3>🎯 Victory Condition</h3>
+          <p id="how-to-play-victory-desc">Guide the Ring Bearer to Mount Doom before turn 40, or hunt them down!</p>
+        </div>
+        <div class="how-to-play-section">
+          <h3>⚔️ Combat Resolution</h3>
+          <ul>
+            <li>Highest total strength in a region wins the combat.</li>
+            <li><strong>Leadership Bonus</strong> adds +1 strength to other units in the region.</li>
+            <li><strong>Fortress Defense</strong> gives +2 defense bonus to the defender.</li>
+          </ul>
+        </div>
+        <div class="how-to-play-section">
+          <h3>📋 Issuing Orders</h3>
+          <p>Select your units on the left panel or click their markers on the map, then build routes or select actions from the Orders panel.</p>
+        </div>
+      </div>
+      <button class="btn-primary" onclick="closeHowToPlayModal()" style="margin-top: 1.5rem; width: 100%;">Enter Battlefield</button>
     </div>
   </div>
 
