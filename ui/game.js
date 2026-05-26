@@ -241,6 +241,16 @@ function loadDemoState() {
 }
 
 // ===================== RENDER UNITS =====================
+function formatUnitName(name) {
+  if (!name) return "";
+  let n = name.split(',')[0].trim();
+  const heroes = ["Frodo", "Aragorn", "Legolas", "Gimli", "Gandalf", "Saruman", "Sauron", "Boromir", "Sam", "Merry", "Pippin", "Gollum", "Galadriel", "Elrond", "Faramir"];
+  for (let h of heroes) {
+    if (n.startsWith(h)) return h;
+  }
+  return n;
+}
+
 function renderUnits() {
   const list = document.getElementById('units-list');
   const myUnits = Object.values(state.units).filter(u =>
@@ -256,7 +266,7 @@ function renderUnits() {
     const maxStr = getMaxStrength(u);
     const pct = maxStr ? Math.round((u.strength / maxStr) * 100) : 0;
     div.innerHTML = `
-      <div class="unit-name">${u.name}</div>
+      <div class="unit-name">${formatUnitName(u.name)}</div>
       <div class="unit-meta">
         <span class="unit-strength">⚔️ ${u.strength}</span>
         <span class="unit-region">📍 ${u.currentRegion || '???'}</span>
@@ -291,6 +301,10 @@ async function selectUnit(unitID) {
   const card = document.getElementById(`unit-card-${unitID}`);
   if (card) card.classList.add('selected');
 
+  document.querySelectorAll('.unit-marker').forEach(m => m.classList.remove('selected-marker'));
+  const marker = document.getElementById(`marker-${unitID}`);
+  if (marker) marker.classList.add('selected-marker');
+
   // Check if it's an enemy unit
   const isEnemy = (state.side === 'light' && u.side === 'SHADOW') || 
                   (state.side === 'dark' && u.side === 'FREE_PEOPLES');
@@ -300,7 +314,7 @@ async function selectUnit(unitID) {
     document.getElementById('selected-unit-info').classList.remove('hidden');
     document.getElementById('selected-unit-info').innerHTML = `
       <p style="color: var(--crimson-bright); font-weight: bold;">Enemy Unit</p>
-      <p>${u.name} (${u.strength}⚔️)</p>
+      <p>${formatUnitName(u.name)} (${u.strength}⚔️)</p>
       <p class="muted">You cannot issue orders to the opponent's forces.</p>
     `;
     return;
@@ -310,7 +324,7 @@ async function selectUnit(unitID) {
   document.getElementById('selected-unit-info').classList.add('hidden');
   const form = document.getElementById('order-form');
   form.classList.remove('hidden');
-  document.getElementById('sel-unit-name').textContent = u.name;
+  document.getElementById('sel-unit-name').textContent = formatUnitName(u.name);
 
   // Fetch available orders.
   try {
@@ -719,26 +733,29 @@ function renderMapMarkers() {
       const marker = document.createElement('div');
       const isRingBearer = u.class === 'RingBearer';
       const isLight = u.side === 'FREE_PEOPLES';
+      marker.id = `marker-${u.id}`;
       marker.className = `unit-marker ${isRingBearer ? 'ring-bearer' : isLight ? 'light' : 'dark'}`;
 
-      // Calculate a pixel offset so markers don't overlap.
-      // E.g., center the cluster by shifting left based on count, and wrap around
-      const cols = Math.min(units.length, 3);
-      const row = Math.floor(i / 3);
-      const col = i % 3;
-      
-      const offsetX = (col - (cols - 1) / 2) * 26; // 26px apart horizontally
-      const offsetY = row * 26; // 26px apart vertically
+      // Arrange markers in a circle if there are multiple
+      const total = units.length;
+      let offsetX = 0;
+      let offsetY = 0;
+      if (total > 1) {
+        const angle = (i / total) * Math.PI * 2 - (Math.PI / 2); // Start at top
+        const radius = 22 + (total > 4 ? Math.floor(total/2)*4 : 0); // Dynamic radius
+        offsetX = Math.cos(angle) * radius;
+        offsetY = Math.sin(angle) * radius;
+      }
 
       marker.style.left = `calc(${pos.x}% + ${offsetX}px)`;
       marker.style.top  = `calc(${pos.y}% + ${offsetY}px)`;
       
-      marker.title = `${u.name} (${u.strength}⚔️)`;
+      marker.title = `${formatUnitName(u.name)} (${u.strength}⚔️)`;
       marker.textContent = isRingBearer ? '💍' : (isLight ? '⚔' : '👁');
 
       const label = document.createElement('div');
       label.className = 'marker-label';
-      label.textContent = u.name;
+      label.textContent = formatUnitName(u.name);
       marker.appendChild(label);
 
       marker.addEventListener('click', () => selectUnit(u.id));
