@@ -175,15 +175,32 @@ func (c *WorldStateCache) Snapshot() WorldStateCache {
 
 	snap.Units = make(map[string]UnitSnapshot, len(c.Units))
 	for k, v := range c.Units {
+		// Deep-copy route slice so concurrent analysis workers see a stable view.
+		if len(v.Route) > 0 {
+			routeCopy := make([]string, len(v.Route))
+			copy(routeCopy, v.Route)
+			v.Route = routeCopy
+		}
 		snap.Units[k] = v
 	}
 	snap.Regions = make(map[string]RegionState, len(c.Regions))
 	for k, v := range c.Regions {
+		if len(v.UnitsPresent) > 0 {
+			cp := make([]string, len(v.UnitsPresent))
+			copy(cp, v.UnitsPresent)
+			v.UnitsPresent = cp
+		}
 		snap.Regions[k] = v
 	}
 	snap.Paths = make(map[string]PathState, len(c.Paths))
 	for k, v := range c.Paths {
 		snap.Paths[k] = v
+	}
+	// Deep-copy ring bearer route too.
+	if len(snap.RingBearer.Route) > 0 {
+		rc := make([]string, len(snap.RingBearer.Route))
+		copy(rc, snap.RingBearer.Route)
+		snap.RingBearer.Route = rc
 	}
 	snap.UnitConfigs = c.UnitConfigs // read-only, safe to share reference
 	return snap

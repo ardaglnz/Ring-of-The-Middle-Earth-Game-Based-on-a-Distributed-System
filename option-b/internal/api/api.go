@@ -278,9 +278,22 @@ func (s *Server) buildStateForSide(snap cache.WorldStateCache, isLight bool) []b
 		Strength      int    `json:"strength"`
 		Status        string `json:"status"`
 	}
+	type RegionJ struct {
+		ID           string `json:"id"`
+		ControlledBy string `json:"controlledBy"`
+		ThreatLevel  int    `json:"threatLevel"`
+		Fortified    bool   `json:"fortified"`
+	}
+	type PathJ struct {
+		ID                string `json:"id"`
+		Status            string `json:"status"`
+		SurveillanceLevel int    `json:"surveillanceLevel"`
+	}
 	type StateJ struct {
-		Turn  int     `json:"turn"`
-		Units []UnitJ `json:"units"`
+		Turn    int       `json:"turn"`
+		Units   []UnitJ   `json:"units"`
+		Regions []RegionJ `json:"regions"`
+		Paths   []PathJ   `json:"paths"`
 	}
 	st := StateJ{Turn: snap.Turn}
 	for id, u := range snap.Units {
@@ -296,6 +309,18 @@ func (s *Server) buildStateForSide(snap cache.WorldStateCache, isLight bool) []b
 			ID: id, Name: u.Config.Name, Class: string(u.Config.Class),
 			Side: string(u.Config.Side), CurrentRegion: region,
 			Strength: u.Strength, Status: string(u.Status),
+		})
+	}
+	for id, r := range snap.Regions {
+		st.Regions = append(st.Regions, RegionJ{
+			ID: id, ControlledBy: string(r.ControlledBy),
+			ThreatLevel: r.ThreatLevel, Fortified: r.Fortified,
+		})
+	}
+	for id, p := range snap.Paths {
+		st.Paths = append(st.Paths, PathJ{
+			ID: id, Status: string(p.Status),
+			SurveillanceLevel: p.SurveillanceLevel,
 		})
 	}
 	b, _ := json.Marshal(st)
@@ -420,7 +445,32 @@ func (s *Server) handleOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Lightweight pre-validation: PDF Section 11 rules 1, 2, 8.
+	snap := s.cache.Snapshot()
+	playerSide := engine.PlayerSideFromID(order.PlayerID)
+
+	if order.Turn != snap.Turn {
+		writeOrderError(w, http.StatusConflict, "WRONG_TURN",
+			"submitted turn does not match current turn")
+		return
+	}
+
+	if u, ok := snap.Units[order.UnitID]; ok && u.Config.Side != playerSide {
+		writeOrderError(w, http.StatusForbidden, "NOT_YOUR_UNIT",
+			"you can only order units on your side")
+		return
+	}
+
 	s.orderMu.Lock()
+	// DUPLICATE_UNIT_ORDER: reject a second order for the same unit this turn.
+	for _, existing := range s.pendingOrders {
+		if existing.UnitID == order.UnitID && existing.Turn == order.Turn {
+			s.orderMu.Unlock()
+			writeOrderError(w, http.StatusConflict, "DUPLICATE_UNIT_ORDER",
+				"this unit already has an order this turn")
+			return
+		}
+	}
 	s.pendingOrders = append(s.pendingOrders, order)
 	s.orderMu.Unlock()
 
@@ -428,6 +478,15 @@ func (s *Server) handleOrder(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
+}
+
+func writeOrderError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{
+		"errorCode":    code,
+		"errorMessage": message,
+	})
 }
 
 func (s *Server) handleGameState(w http.ResponseWriter, r *http.Request) {
@@ -449,10 +508,16 @@ func (s *Server) handleGameState(w http.ResponseWriter, r *http.Request) {
 		ThreatLevel  int    `json:"threatLevel"`
 		Fortified    bool   `json:"fortified"`
 	}
+	type PathOut struct {
+		ID                string `json:"id"`
+		Status            string `json:"status"`
+		SurveillanceLevel int    `json:"surveillanceLevel"`
+	}
 	type Out struct {
 		Turn    int         `json:"turn"`
 		Units   []UnitOut   `json:"units"`
 		Regions []RegionOut `json:"regions"`
+		Paths   []PathOut   `json:"paths"`
 	}
 
 	// Determine player side from playerID prefix.
@@ -487,6 +552,14 @@ func (s *Server) handleGameState(w http.ResponseWriter, r *http.Request) {
 			ControlledBy: string(reg.ControlledBy),
 			ThreatLevel:  reg.ThreatLevel,
 			Fortified:    reg.Fortified,
+		})
+	}
+
+	for id, p := range snap.Paths {
+		out.Paths = append(out.Paths, PathOut{
+			ID:                id,
+			Status:            string(p.Status),
+			SurveillanceLevel: p.SurveillanceLevel,
 		})
 	}
 
@@ -613,23 +686,40 @@ func availableOrders(u cache.UnitSnapshot, snap cache.WorldStateCache, playerID 
 	}
 	orders = append(orders, "ASSIGN_ROUTE", "REDIRECT_UNIT")
 
-	// Config-driven: Maia ability available if not on cooldown.
-	if u.Config.Maia && u.Cooldown == 0 {
+	// Config-driven: Maia ability available if active, not on cooldown,
+	// and the unit is actually meant to dispatch (Sauron is passive only —
+	// detected by startRegion == "mordor" without hardcoding the unit id).
+	if u.Config.Maia && u.Cooldown == 0 && u.Status == cache.UnitActive && u.Config.StartRegion != "mordor" {
 		orders = append(orders, "MAIA_ABILITY")
 	}
 	// Config-driven: GondorArmy can fortify.
 	if u.Config.CanFortify {
 		orders = append(orders, "FORTIFY_REGION")
 	}
-	// Config-driven: only dark side gets SearchPath/BlockPath.
+	// PDF Section 5: BlockPath / SearchPath are not restricted to one side,
+	// but in practice are dark-side moves. Allow both sides to use them
+	// (the engine still enforces endpoint / side rules).
+	orders = append(orders, "BLOCK_PATH")
 	if u.Config.Side == config.SideShadow {
-		orders = append(orders, "BLOCK_PATH", "SEARCH_PATH")
+		orders = append(orders, "SEARCH_PATH")
 	}
-	// Config-driven: RingBearer can DestroyRing if at mount-doom.
+
+	// Config-driven: RingBearer can submit DESTROY_RING whenever the route ends
+	// at mount-doom or it is currently there. Players need to submit the order
+	// the SAME turn the Ring Bearer arrives (Section 1.2), so we cannot wait
+	// until "already at mount-doom" — that would force a one-turn delay.
 	if u.Config.Class == config.ClassRingBearer {
 		rb := snap.RingBearer
 		if rb.TrueRegion == "mount-doom" {
 			orders = append(orders, "DESTROY_RING")
+		} else if len(rb.Route) > 0 && rb.RouteIdx < len(rb.Route) {
+			// If the very next path will land them on mount-doom, allow DESTROY_RING.
+			nextPath := rb.Route[rb.RouteIdx]
+			if path, ok := snap.Paths[nextPath]; ok {
+				if path.Config.To == "mount-doom" || path.Config.From == "mount-doom" {
+					orders = append(orders, "DESTROY_RING")
+				}
+			}
 		}
 	}
 

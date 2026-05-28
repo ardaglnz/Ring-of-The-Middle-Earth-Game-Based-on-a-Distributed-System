@@ -18,12 +18,15 @@ const state = {
   timerRemaining: 60,
   hasSubmittedOrder: false,
   builtRoute: [],
+  builtRouteRegions: [], // cached for visual preview
   zoomLevel: 1,
   panX: 0,
   panY: 0,
   isPanning: false,
   startX: 0,
   startY: 0,
+  lastDetectedRegion: null, // Dark side: last seen ring-bearer region
+  lastDetectedTurn: 0,
 };
 
 // ===================== SIDE SELECTION =====================
@@ -44,13 +47,43 @@ function chooseSide(side) {
 function showHowToPlayModal() {
   const modal = document.getElementById('how-to-play-modal');
   const victoryDesc = document.getElementById('how-to-play-victory-desc');
-  
+  const tipsTitle = document.getElementById('how-to-play-tips-title');
+  const tipsList = document.getElementById('how-to-play-tips-list');
+
   if (state.side === 'light') {
-    victoryDesc.innerHTML = 'Guide <strong>Frodo Baggins (the Ring Bearer)</strong> safely from The Shire to <strong>Mount Doom</strong> before Turn 40 to destroy the One Ring. Maintain secrecy — the Shadow player cannot see Frodo\'s true position unless he is detected!';
+    victoryDesc.innerHTML =
+      'Move <strong>Frodo</strong> from <strong>The Shire</strong> to <strong>Mount Doom</strong>. ' +
+      'To win, end a turn with Frodo at Mount Doom, with <strong>no Shadow unit there</strong>, ' +
+      'and submit <code>DESTROY_RING</code> on that same turn. ' +
+      'Only YOU see Frodo\'s real position — keep it that way.';
+    tipsTitle.textContent = '💡 Light Side Tips';
+    tipsList.innerHTML = `
+      <li>Plan Frodo\'s entire route up front — he advances one step per turn automatically.</li>
+      <li>Escort Frodo with <strong>Fellowship Guards</strong> (Aragorn, Legolas, Gimli) along the path endpoints — they prevent Nazgul from blocking the route.</li>
+      <li>If a path is BLOCKED, move <strong>Gandalf</strong> adjacent and use <code>MAIA_ABILITY</code> to open it for 2 turns.</li>
+      <li>Keep the <strong>Gondor Army</strong> at Minas Tirith and <code>FORTIFY_REGION</code> — Uruk-hai alone can\'t breach it.</li>
+      <li>Use the 🔮 analysis to compare the 4 canonical routes by risk score.</li>
+      <li>If the northern corridor is threatened, switch Frodo to the southern corridor via Tharbad.</li>
+      <li>On the turn you expect Frodo to arrive at Mount Doom, submit <code>DESTROY_RING</code> at the same time — auto-advance happens before the win check.</li>
+    `;
   } else {
-    victoryDesc.innerHTML = 'Hunt down the Ring Bearer! Deploy the Nazgul and Saruman\'s armies, block paths, search regions, and defeat the Light Side guards to capture the Ring before Turn 40.';
+    victoryDesc.innerHTML =
+      'Find <strong>Frodo</strong> and corner him before he reaches Mount Doom. ' +
+      'To win, end a turn with a <strong>Nazgul co-located with Frodo</strong> AND Frodo <strong>exposed</strong> ' +
+      '(within Nazgul detection range OR crossing a surveilled path). ' +
+      'Detection is suppressed for the first 3 turns.';
+    tipsTitle.textContent = '💡 Shadow Tips';
+    tipsList.innerHTML = `
+      <li>Position <strong>Nazgul 2 & 3</strong> at chokepoints (Bree, Lothlórien, Emyn Muil) <em>before turn 4</em> — that\'s when detection kicks in.</li>
+      <li>Use <code>SEARCH_PATH</code> to raise surveillance on likely Frodo paths. Crossing a surveilled path exposes him for that turn.</li>
+      <li>When a detection event fires, race the <strong>Witch-King</strong> (range 2) to that region — he\'s indestructible.</li>
+      <li>Saruman should <code>MAIA_ABILITY</code> a Route 4 path early (e.g. <code>fords-of-isen-to-edoras</code>) — permanent surveillance.</li>
+      <li>Keep <strong>Sauron in Mordor</strong> — his passive Eye gives every Nazgul +1 detection range.</li>
+      <li>Use the 🔮 analysis to see intercept scores for each Nazgul.</li>
+      <li>To break a fortified Minas Tirith, attack with the <strong>Witch-King + Uruk-hai together</strong> — neither alone is enough.</li>
+    `;
   }
-  
+
   modal.classList.remove('hidden');
 }
 
@@ -129,12 +162,17 @@ function handleServerEvent(data) {
     showGameOver(data.winner, data.cause);
   }
   if (data.type === 'RingBearerDetected') {
-    logEvent(`🔴 Ring Bearer DETECTED at ${data.regionId}!`, 'detection');
-    showToast(`Ring Bearer detected at ${data.regionId}!`, 'error');
+    const where = friendlyRegion(data.regionId);
+    logEvent(`🔴 Ring Bearer DETECTED at ${where}!`, 'detection');
+    showToast(`Ring Bearer detected at ${where}!`, 'error');
+    // Dark Side: remember last seen position to show a ghost marker on the map.
+    state.lastDetectedRegion = data.regionId;
+    state.lastDetectedTurn = state.turn;
+    renderMapMarkers();
   }
   if (data.type === 'RingBearerMoved') {
     // Light Side only.
-    logEvent(`💍 Ring Bearer moved to ${data.trueRegion}`, 'movement');
+    logEvent(`💍 Ring Bearer moved to ${friendlyRegion(data.trueRegion)}`, 'movement');
   }
 }
 
@@ -191,6 +229,13 @@ function updateWorldState(data) {
       data.regions.forEach(r => { state.regions[r.id] = r; });
     } else {
       state.regions = data.regions;
+    }
+  }
+  if (data.paths) {
+    if (Array.isArray(data.paths)) {
+      data.paths.forEach(p => { state.paths[p.id] = p; });
+    } else {
+      state.paths = data.paths;
     }
   }
   renderUnits();
@@ -463,23 +508,109 @@ function getAdjacentPaths(regionId) {
 function renderRouteBuilder(orderType, u) {
   const params = document.getElementById('order-params');
   let currentRegion = u.currentRegion;
+  // Ring Bearer's true region is hidden — but for the Light Side it should be
+  // populated from /game/state. As a fallback fall back to the-shire (turn 1 start).
   if (u.class === 'RingBearer' && !currentRegion) {
     currentRegion = 'the-shire';
   }
 
-  const adj = getAdjacentPaths(currentRegion);
-  const selectOptions = adj.map(a => `<option value="${a.pathId}">➡️ ${a.nextRegionName}</option>`).join('');
-
+  // Render once; the rest is filled by updateRouteBuilder().
+  const hiddenId = orderType === 'ASSIGN_ROUTE' ? 'param-pathIds' : 'param-newPathIds';
   params.innerHTML = `
-    <div class="form-group" style="margin-top: 0.5rem;">
-      <label>Next Path from ${ALL_REGIONS.find(r => r.id === currentRegion)?.name || currentRegion}</label>
-      <select id="${orderType === 'ASSIGN_ROUTE' ? 'param-pathIds' : 'param-newPathIds'}" class="input-field" onchange="highlightCurrentTarget()">
-        <option value="" disabled selected>Select destination...</option>
-        ${selectOptions || '<option value="" disabled>No paths available</option>'}
-      </select>
-      <div style="margin-top:0.5rem; font-size:0.8rem; color:#aaa;">(Only one move allowed per turn)</div>
+    <input type="hidden" id="${hiddenId}" value="" />
+    <div class="route-builder-container">
+      <div class="route-builder-header">
+        <span class="route-builder-title">Built route</span>
+        <button type="button" class="route-builder-clear" onclick="clearBuiltRoute()">Clear</button>
+      </div>
+      <div id="route-builder-chips" class="route-builder-list">
+        <span class="route-builder-empty">No steps yet</span>
+      </div>
+      <div class="route-builder-select-wrap">
+        <select id="route-next-step" class="input-field"></select>
+        <button type="button" class="btn-icon" onclick="appendRouteStep()" title="Add step">➕</button>
+      </div>
+      <div style="font-size:0.78rem; color:var(--text-muted);">
+        Units auto-advance one step per turn — chain multiple paths for a full route.
+      </div>
     </div>
   `;
+
+  // Initialise built route from current state if we were in the middle of editing.
+  state.builtRoute = [];
+  state.builtRouteRegions = [currentRegion];
+  updateRouteBuilder(hiddenId);
+}
+
+function currentRouteTip() {
+  // Last region in the built chain.
+  const arr = state.builtRouteRegions;
+  return arr[arr.length - 1];
+}
+
+function updateRouteBuilder(hiddenId) {
+  // Refresh the dropdown of next-step options based on the tip of the built chain.
+  const tip = currentRouteTip();
+  const adj = getAdjacentPaths(tip);
+  const sel = document.getElementById('route-next-step');
+  if (sel) {
+    sel.innerHTML = `<option value="" disabled selected>Add step from ${friendlyRegion(tip)}…</option>` +
+      adj.map(a => `<option value="${a.pathId}|${a.nextRegion}">➡️ ${a.nextRegionName}</option>`).join('');
+  }
+
+  const chips = document.getElementById('route-builder-chips');
+  if (chips) {
+    if (state.builtRoute.length === 0) {
+      chips.innerHTML = `<span class="route-builder-empty">No steps yet — start from ${friendlyRegion(state.builtRouteRegions[0])}</span>`;
+    } else {
+      const parts = [`<span class="route-builder-chip">${friendlyRegion(state.builtRouteRegions[0])}</span>`];
+      state.builtRoute.forEach((pid, i) => {
+        parts.push('<span class="route-builder-arrow">→</span>');
+        parts.push(`<span class="route-builder-chip" title="${pid}">${friendlyRegion(state.builtRouteRegions[i + 1])}</span>`);
+      });
+      chips.innerHTML = parts.join(' ');
+    }
+  }
+
+  // Write to hidden input so submitOrder picks it up.
+  const hidden = document.getElementById(hiddenId);
+  if (hidden) {
+    hidden.value = state.builtRoute.join(',');
+  }
+
+  // Repaint the preview line.
+  redrawRoutePreview();
+}
+
+function appendRouteStep() {
+  const sel = document.getElementById('route-next-step');
+  if (!sel || !sel.value) return;
+  const [pathId, nextRegion] = sel.value.split('|');
+  state.builtRoute.push(pathId);
+  state.builtRouteRegions.push(nextRegion);
+
+  // Auto-detect hidden id from DOM.
+  const hiddenId = document.getElementById('param-pathIds')
+    ? 'param-pathIds'
+    : 'param-newPathIds';
+  updateRouteBuilder(hiddenId);
+}
+
+function clearBuiltRoute() {
+  const u = state.units[state.selectedUnitID];
+  if (!u) return;
+  let currentRegion = u.currentRegion;
+  if (u.class === 'RingBearer' && !currentRegion) currentRegion = 'the-shire';
+  state.builtRoute = [];
+  state.builtRouteRegions = [currentRegion];
+  const hiddenId = document.getElementById('param-pathIds')
+    ? 'param-pathIds'
+    : 'param-newPathIds';
+  updateRouteBuilder(hiddenId);
+}
+
+function friendlyRegion(id) {
+  return ALL_REGIONS.find(r => r.id === id)?.name || id || '???';
 }
 
 // ===================== SUBMIT ORDER =====================
@@ -508,10 +639,15 @@ async function submitOrder() {
       showToast(`Order submitted: ${formatOrderName(orderType)}`, 'success');
       logEvent(`📤 ${state.units[state.selectedUnitID]?.name}: ${formatOrderName(orderType)}`, 'movement');
       state.hasSubmittedOrder = true;
+      // Reset transient route-builder state so the next order starts fresh.
+      state.builtRoute = [];
+      state.builtRouteRegions = [];
       updatePlayerPlanningStatus();
     } else {
       const err = await res.json().catch(() => ({}));
-      showToast(`Order rejected: ${err.errorCode || res.status}`, 'error');
+      const code = err.errorCode || res.status;
+      const msg = err.errorMessage ? ` — ${err.errorMessage}` : '';
+      showToast(`Order rejected: ${code}${msg}`, 'error');
     }
   } catch (e) {
     showToast('Demo mode — order noted locally', 'info');
@@ -545,8 +681,18 @@ async function requestFastForward() {
 function buildPayload(orderType) {
   const get = id => document.getElementById(id)?.value || '';
   switch (orderType) {
-    case 'ASSIGN_ROUTE':    return { pathIds: get('param-pathIds').split(',').map(s=>s.trim()).filter(Boolean) };
-    case 'REDIRECT_UNIT':   return { newPathIds: get('param-newPathIds').split(',').map(s=>s.trim()).filter(Boolean) };
+    case 'ASSIGN_ROUTE': {
+      const ids = state.builtRoute && state.builtRoute.length
+        ? state.builtRoute.slice()
+        : get('param-pathIds').split(',').map(s => s.trim()).filter(Boolean);
+      return { pathIds: ids };
+    }
+    case 'REDIRECT_UNIT': {
+      const ids = state.builtRoute && state.builtRoute.length
+        ? state.builtRoute.slice()
+        : get('param-newPathIds').split(',').map(s => s.trim()).filter(Boolean);
+      return { newPathIds: ids };
+    }
     case 'BLOCK_PATH':
     case 'SEARCH_PATH':     return { pathId: get('param-pathId') };
     case 'ATTACK_REGION':
@@ -717,6 +863,22 @@ const ALL_PATHS = [
 function renderMapMarkers() {
   const container = document.getElementById('unit-markers');
   container.innerHTML = '';
+
+  // Dark Side: ghost marker for the last-detected Ring Bearer region
+  // (lingers for 2 turns after the detection so the player can react).
+  if (state.side === 'dark' && state.lastDetectedRegion &&
+      state.turn - state.lastDetectedTurn <= 2) {
+    const pos = REGION_POSITIONS[state.lastDetectedRegion];
+    if (pos) {
+      const ghost = document.createElement('div');
+      ghost.className = 'ring-bearer-ghost';
+      ghost.title = `Last seen at ${friendlyRegion(state.lastDetectedRegion)} (turn ${state.lastDetectedTurn})`;
+      ghost.style.left = `${pos.x}%`;
+      ghost.style.top = `${pos.y}%`;
+      ghost.textContent = '👁️?';
+      container.appendChild(ghost);
+    }
+  }
 
   const unitsByRegion = {};
   Object.values(state.units).forEach(u => {
@@ -944,6 +1106,17 @@ function highlightCurrentTarget() {
     const el = document.getElementById(orderType === 'ASSIGN_ROUTE' ? 'param-pathIds' : 'param-newPathIds');
     if (el && el.value) highlightPath(el.value);
   }
+}
+
+// ===================== ROUTE PREVIEW (panel-only) =====================
+// Canvas-based map overlays were removed because they fight with the SVG map's
+// own path rendering and produce misaligned lines under zoom/pan. The route
+// chips in the order panel already show the planned path clearly.
+function redrawRoutePreview() { /* no-op */ }
+
+function isOwnUnit(u) {
+  return (state.side === 'light' && u.side === 'FREE_PEOPLES') ||
+         (state.side === 'dark' && u.side === 'SHADOW');
 }
 
 // Initialize map controls on load

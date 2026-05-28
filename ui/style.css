@@ -643,3 +643,27 @@ html, body {
   gap: 0.4rem;
 }
 
+/* ---- Ring Bearer Last-Seen Ghost (Dark Side only) ---- */
+.ring-bearer-ghost {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgba(192, 57, 43, 0.20);
+  border: 2px dashed rgba(192, 57, 43, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: #ffdcdc;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+  z-index: 6;
+  animation: ghostFade 3s infinite ease-in-out;
+}
+
+@keyframes ghostFade {
+  0%, 100% { opacity: 0.55; box-shadow: 0 0 8px rgba(192,57,43,0.4); }
+  50%      { opacity: 1.0;  box-shadow: 0 0 16px rgba(192,57,43,0.8); }
+}
+

@@ -61,6 +61,7 @@
       <div class="header-right">
         <div id="status-dot" class="status-dot connecting"></div>
         <span id="status-label" class="status-label">Connecting…</span>
+        <button class="btn-icon" onclick="showHowToPlayModal()" title="How to Play">❓</button>
         <button id="btn-fast-forward" class="btn-icon" onclick="requestFastForward()" title="Fast Forward Turn">⏩</button>
         <button class="btn-icon" onclick="requestAnalysis()" title="Show Analysis">🔮</button>
       </div>
@@ -143,24 +144,46 @@
     <div class="how-to-play-card glass">
       <div class="how-to-play-header">
         <h2 class="title-main" style="font-size: 1.8rem;">How to Play</h2>
-        <p class="subtitle" style="margin-top: 0.2rem;">Read these ancient scrolls before entering battle</p>
+        <p class="subtitle" style="margin-top: 0.2rem;">Read this scroll before entering battle</p>
       </div>
       <div class="how-to-play-content">
         <div class="how-to-play-section">
-          <h3>🎯 Victory Condition</h3>
-          <p id="how-to-play-victory-desc">Guide the Ring Bearer to Mount Doom before turn 40, or hunt them down!</p>
+          <h3>🎯 Your Objective</h3>
+          <p id="how-to-play-victory-desc">—</p>
         </div>
         <div class="how-to-play-section">
-          <h3>⚔️ Combat Resolution</h3>
+          <h3>🕒 Turn Flow</h3>
           <ul>
-            <li>Highest total strength in a region wins the combat.</li>
-            <li><strong>Leadership Bonus</strong> adds +1 strength to other units in the region.</li>
-            <li><strong>Fortress Defense</strong> gives +2 defense bonus to the defender.</li>
+            <li>Both players plan <strong>simultaneously</strong> — there are no waiting turns.</li>
+            <li>Each turn lasts <strong>60 seconds</strong>. Press <strong>⏩</strong> to fast-forward when both sides are ready.</li>
+            <li>Only <strong>one order per unit per turn</strong>. A second submission is rejected (<code>DUPLICATE_UNIT_ORDER</code>).</li>
+            <li>The first <strong>3 turns</strong> are a setup phase — Nazgul detection is suppressed.</li>
+            <li>Game ends in a <strong>draw</strong> after 40 turns with no winner.</li>
           </ul>
         </div>
         <div class="how-to-play-section">
-          <h3>📋 Issuing Orders</h3>
-          <p>Select your units on the left panel or click their markers on the map, then build routes or select actions from the Orders panel.</p>
+          <h3>🗺️ Movement & Routes</h3>
+          <ul>
+            <li>Select a unit and choose <code>ASSIGN_ROUTE</code> — chain <strong>multiple paths</strong> together.</li>
+            <li>Units <strong>auto-advance one step</strong> along their route every turn end.</li>
+            <li>Use <code>REDIRECT_UNIT</code> to switch course mid-journey.</li>
+            <li>Path status (OPEN / THREATENED / BLOCKED / TEMPORARILY_OPEN / surveilled) is shown when you pick a path in the order dropdown — the highlighted dashed circle on the map marks the target.</li>
+          </ul>
+        </div>
+        <div class="how-to-play-section">
+          <h3>⚔️ Combat</h3>
+          <ul>
+            <li>Total <strong>attacker strength</strong> vs total <strong>defender strength</strong>.</li>
+            <li><strong>Leadership</strong>: a leader (Aragorn, Witch-King) gives <strong>+1</strong> to every other ally in the same region.</li>
+            <li><strong>Fortress</strong> terrain → defender <strong>+2</strong>. <strong>Mountains</strong> → defender +1.</li>
+            <li><strong>Fortification</strong> (Gondor Army) → another <strong>+2</strong> on top.</li>
+            <li>Uruk-hai <strong>ignore fortress terrain bonus</strong> when attacking — but fortification still counts.</li>
+            <li>Tie or defender wins ⇒ each attacker loses 1 strength.</li>
+          </ul>
+        </div>
+        <div class="how-to-play-section" id="how-to-play-side-tips">
+          <h3 id="how-to-play-tips-title">💡 Tips</h3>
+          <ul id="how-to-play-tips-list"></ul>
         </div>
       </div>
       <button class="btn-primary" onclick="closeHowToPlayModal()" style="margin-top: 1.5rem; width: 100%;">Enter Battlefield</button>

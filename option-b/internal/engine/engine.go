@@ -100,6 +100,21 @@ func (tp *TurnProcessor) ProcessTurn(orders []Order) {
 		turn := c.Turn
 
 		// Step 1: Orders already collected.
+		// Drop any stale-turn orders (PDF Section 11 Rule 1: WRONG_TURN).
+		filtered := orders[:0]
+		for _, o := range orders {
+			if o.Turn != 0 && o.Turn != turn {
+				log.Printf("[engine] WRONG_TURN: dropping %s for %s (order.turn=%d, current=%d)",
+					o.OrderType, o.UnitID, o.Turn, turn)
+				continue
+			}
+			filtered = append(filtered, o)
+		}
+		orders = filtered
+
+		// Enforce DUPLICATE_UNIT_ORDER (PDF Section 5.1 / Section 11 Rule 8):
+		// keep only the first order seen per unit id this turn.
+		orders = dedupeOrdersByUnit(orders)
 
 		// Step 2: AssignRoute and RedirectUnit.
 		for _, o := range orders {
@@ -248,21 +263,26 @@ func (tp *TurnProcessor) applyBlockPath(c *cache.WorldStateCache, o Order) {
 	}
 	// Unit must be at an endpoint.
 	if u.Region != path.Config.From && u.Region != path.Config.To {
+		log.Printf("[engine] UNIT_NOT_ADJACENT: %s cannot block %s from %s", o.UnitID, p.PathID, u.Region)
 		return
 	}
 
-	// Rule: A FellowshipGuard stationed at a path endpoint prevents a Nazgul from permanently blocking that path.
-	guardPresent := false
-	for _, unit := range c.Units {
-		if unit.Config.Class == config.ClassFellowshipGuard && unit.Status == cache.UnitActive {
-			if unit.Region == path.Config.From || unit.Region == path.Config.To {
-				guardPresent = true
-				break
+	// PDF Section 2.4 / 7.1: "A FellowshipGuard stationed at a path endpoint prevents
+	// a Nazgul from permanently blocking that path — the Nazgul must defeat the guard first."
+	// This rule applies ONLY when the blocker is a Nazgul, and ignores the blocking unit
+	// itself (a guard can never "block itself out").
+	if u.Config.Class == config.ClassNazgul {
+		for _, other := range c.Units {
+			if other.ID == u.ID {
+				continue
+			}
+			if other.Config.Class == config.ClassFellowshipGuard &&
+				other.Status == cache.UnitActive &&
+				(other.Region == path.Config.From || other.Region == path.Config.To) {
+				log.Printf("[engine] BLOCK refused: FellowshipGuard %s defends endpoint of %s", other.ID, p.PathID)
+				return
 			}
 		}
-	}
-	if guardPresent {
-		return // Block fails because of the guard
 	}
 
 	path.Status = cache.StatusBlocked
@@ -277,6 +297,15 @@ func (tp *TurnProcessor) applySearchPath(c *cache.WorldStateCache, o Order) {
 	}
 	path, ok := c.Paths[p.PathID]
 	if !ok {
+		return
+	}
+	// PDF Section 11 Rule 5: unit must be at an endpoint.
+	u, ok := c.Units[o.UnitID]
+	if !ok || u.Status != cache.UnitActive {
+		return
+	}
+	if u.Region != path.Config.From && u.Region != path.Config.To {
+		log.Printf("[engine] UNIT_NOT_ADJACENT: %s cannot search %s from %s", o.UnitID, p.PathID, u.Region)
 		return
 	}
 	if path.SurveillanceLevel < 3 {
@@ -325,11 +354,17 @@ func (tp *TurnProcessor) applyMaiaAbility(c *cache.WorldStateCache, o Order, tur
 	if !ok {
 		return
 	}
+	// Must be ACTIVE — DESTROYED Maia (e.g. Saruman after Isengard falls) cannot dispatch.
+	if u.Status != cache.UnitActive {
+		log.Printf("[engine] MAIA_DISABLED: %s is not active", o.UnitID)
+		return
+	}
 	// Config-driven: only Maia class.
 	if !u.Config.Maia {
 		return
 	}
 	if u.Cooldown > 0 {
+		log.Printf("[engine] ABILITY_ON_COOLDOWN: %s cooldown=%d", o.UnitID, u.Cooldown)
 		return
 	}
 
@@ -412,11 +447,17 @@ func (tp *TurnProcessor) autoAdvance(c *cache.WorldStateCache, turn int) {
 		}
 
 		// OPEN, THREATENED, or TEMPORARILY_OPEN → advance.
+		// The unit MUST currently be at one of this path's endpoints — otherwise
+		// the route is invalid (silently skip rather than teleport).
 		var dest string
-		if u.Region == path.Config.From {
+		switch u.Region {
+		case path.Config.From:
 			dest = path.Config.To
-		} else {
+		case path.Config.To:
 			dest = path.Config.From
+		default:
+			log.Printf("[engine] RouteInvalid: %s not at endpoint of %s (region=%s) — skipping", uid, nextPathID, u.Region)
+			continue
 		}
 
 		u.Region = dest
@@ -463,6 +504,21 @@ func (tp *TurnProcessor) applyAttack(c *cache.WorldStateCache, o Order, turn int
 	region, ok := c.Regions[p.TargetRegion]
 	if !ok {
 		return
+	}
+
+	// PDF Section 11 Rule 6: AttackRegion target must be adjacent and enemy-controlled.
+	// We allow same-region attack (already engaged) as a no-op join, but cross-region
+	// attacks require an OPEN/THREATENED/TEMPORARILY_OPEN path between the two regions.
+	if attacker.Region != p.TargetRegion {
+		pathID := tp.graph.PathBetween(attacker.Region, p.TargetRegion)
+		if pathID == "" {
+			log.Printf("[engine] INVALID_TARGET: %s cannot attack non-adjacent %s from %s", o.UnitID, p.TargetRegion, attacker.Region)
+			return
+		}
+		if path, ok := c.Paths[pathID]; ok && path.Status == cache.StatusBlocked {
+			log.Printf("[engine] PATH_BLOCKED: %s cannot attack %s via blocked %s", o.UnitID, p.TargetRegion, pathID)
+			return
+		}
 	}
 
 	// Collect all attackers (same side, attacking same region).
@@ -804,6 +860,26 @@ func PlayerSideFromID(playerID string) config.Side {
 		return config.SideFreePeoples
 	}
 	return config.SideShadow
+}
+
+// dedupeOrdersByUnit keeps only the first order per unit id in submission order.
+// Enforces PDF Section 5.1: "Maximum one order per unit per turn".
+func dedupeOrdersByUnit(orders []Order) []Order {
+	seen := make(map[string]bool, len(orders))
+	out := make([]Order, 0, len(orders))
+	for _, o := range orders {
+		if o.UnitID == "" {
+			out = append(out, o)
+			continue
+		}
+		if seen[o.UnitID] {
+			log.Printf("[engine] DUPLICATE_UNIT_ORDER: dropping extra order for %s (%s)", o.UnitID, o.OrderType)
+			continue
+		}
+		seen[o.UnitID] = true
+		out = append(out, o)
+	}
+	return out
 }
 
 // Errorf wraps fmt.Errorf.
