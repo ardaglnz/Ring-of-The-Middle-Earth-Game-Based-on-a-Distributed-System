@@ -27,6 +27,7 @@ const state = {
   startY: 0,
   lastDetectedRegion: null, // Dark side: last seen ring-bearer region
   lastDetectedTurn: 0,
+  myPendingOrders: [],     // orders submitted this turn (cleared on turn change)
 };
 
 // ===================== SIDE SELECTION =====================
@@ -194,6 +195,12 @@ function updateWorldState(data) {
     if (data.turn !== state.turn) {
       state.hasSubmittedOrder = false;
       state.builtRoute = []; // clear route builder on new turn
+      // Pending-orders panel clears whenever the turn ticks over.
+      if ((state.myPendingOrders || []).length > 0) {
+        logEvent(`📜 Previous turn's orders processed (${state.myPendingOrders.length} order${state.myPendingOrders.length===1?'':'s'})`, 'system');
+      }
+      state.myPendingOrders = [];
+      renderPendingOrders();
       const btn = document.getElementById('btn-fast-forward');
       if (btn) {
         btn.disabled = false;
@@ -303,15 +310,21 @@ function renderUnits() {
     (state.side === 'dark'  && u.side === 'SHADOW')
   );
 
+  const pending = state.myPendingOrders || [];
   list.innerHTML = '';
   myUnits.forEach(u => {
+    const hasOrder = pending.some(o => o.unitId === u.id);
     const div = document.createElement('div');
-    div.className = `unit-card${u.status === 'DESTROYED' ? ' destroyed' : ''}${state.selectedUnitID === u.id ? ' selected' : ''}`;
+    const classes = ['unit-card'];
+    if (u.status === 'DESTROYED') classes.push('destroyed');
+    if (state.selectedUnitID === u.id) classes.push('selected');
+    if (hasOrder) classes.push('has-order');
+    div.className = classes.join(' ');
     div.id = `unit-card-${u.id}`;
     const maxStr = getMaxStrength(u);
     const pct = maxStr ? Math.round((u.strength / maxStr) * 100) : 0;
     div.innerHTML = `
-      <div class="unit-name">${formatUnitName(u.name)}</div>
+      <div class="unit-name">${formatUnitName(u.name)}${hasOrder ? '<span class="unit-ordered-badge" title="Order locked in this turn">✅</span>' : ''}</div>
       <div class="unit-meta">
         <span class="unit-strength">⚔️ ${u.strength}</span>
         <span class="unit-region">📍 ${u.currentRegion || '???'}</span>
@@ -365,11 +378,40 @@ async function selectUnit(unitID) {
     return;
   }
 
+  // If this unit ALREADY has an order this turn, show the locked panel
+  // instead of the order form. PDF Section 5.1: one order per unit per turn,
+  // duplicates are rejected with DUPLICATE_UNIT_ORDER.
+  const existing = (state.myPendingOrders || []).find(o => o.unitId === unitID);
+  if (existing) {
+    document.getElementById('order-form').classList.add('hidden');
+    const info = document.getElementById('selected-unit-info');
+    info.classList.remove('hidden');
+    info.innerHTML = `
+      <div class="already-ordered">
+        <div class="ao-check">✅</div>
+        <div class="ao-title">${formatUnitName(u.name)}'s order is locked in</div>
+        <div class="ao-card">
+          <span class="ao-icon">${orderIcon(existing.orderType)}</span>
+          <div class="ao-body">
+            <div class="ao-type">${formatOrderName(existing.orderType)}</div>
+            <div class="ao-detail">${existing.detail || ''}</div>
+          </div>
+        </div>
+        <p class="ao-note">Each unit can submit only <b>one order per turn</b>. Pick a different unit on the left, or wait for the next turn.</p>
+      </div>
+    `;
+    return;
+  }
+
   // Show order form for own unit.
   document.getElementById('selected-unit-info').classList.add('hidden');
   const form = document.getElementById('order-form');
   form.classList.remove('hidden');
   document.getElementById('sel-unit-name').textContent = formatUnitName(u.name);
+
+  // Refresh action hints on the map and the textual action plan.
+  renderActionHints();
+  renderActionPlan(u);
 
   // Fetch available orders.
   try {
@@ -466,17 +508,72 @@ function onOrderTypeChange() {
         </select>
       </div>
     `;
-  } else if (orderType === 'ATTACK_REGION' || orderType === 'REINFORCE_REGION' || orderType === 'DEPLOY_NAZGUL') {
-    const options = ALL_REGIONS.map(r => `<option value="${r.id}">${r.name}</option>`).join('');
-    params.innerHTML = `
-      <div class="form-group">
-        <label>Select Target Region</label>
-        <select id="param-targetRegion" class="input-field" onchange="highlightCurrentTarget()">
-          <option value="" disabled selected>Select a region...</option>
-          ${options}
-        </select>
-      </div>
-    `;
+  } else if (orderType === 'ATTACK_REGION') {
+    // PDF Rule 6: target must be adjacent AND have an enemy unit.
+    const adj = getAdjacentPaths(u.currentRegion);
+    const targets = adj
+      .map(a => ({
+        id: a.nextRegion,
+        name: a.nextRegionName,
+        enemies: Object.values(state.units).filter(e =>
+          e.currentRegion === a.nextRegion && !isOwnUnit(e) && e.status === 'ACTIVE'),
+      }))
+      .filter(t => t.enemies.length > 0);
+
+    if (targets.length === 0) {
+      params.innerHTML = `<p class="muted">No adjacent region contains an enemy unit. Move closer first.</p>`;
+    } else {
+      const options = targets.map(t => {
+        const summary = t.enemies.map(e => `${formatUnitName(e.name)} (${e.strength}⚔)`).join(', ');
+        return `<option value="${t.id}">⚔️ ${t.name} — ${summary}</option>`;
+      }).join('');
+      params.innerHTML = `
+        <div class="form-group">
+          <label>Select Target Region (adjacent + enemy present)</label>
+          <select id="param-targetRegion" class="input-field" onchange="onAttackTargetChange()">
+            <option value="" disabled selected>Choose target…</option>
+            ${options}
+          </select>
+        </div>
+        <div id="combat-preview" class="combat-preview hidden"></div>
+      `;
+    }
+  } else if (orderType === 'REINFORCE_REGION') {
+    // Sanity: reinforce should also be adjacent.
+    const adj = getAdjacentPaths(u.currentRegion);
+    if (adj.length === 0) {
+      params.innerHTML = `<p class="muted">No adjacent regions reachable.</p>`;
+    } else {
+      const options = adj.map(a => `<option value="${a.nextRegion}">➡️ ${a.nextRegionName}</option>`).join('');
+      params.innerHTML = `
+        <div class="form-group">
+          <label>Reinforce Adjacent Region</label>
+          <select id="param-targetRegion" class="input-field" onchange="highlightCurrentTarget()">
+            <option value="" disabled selected>Choose region…</option>
+            ${options}
+          </select>
+        </div>
+      `;
+    }
+  } else if (orderType === 'DEPLOY_NAZGUL') {
+    // Nazgul can be deployed to any Shadow-controlled region.
+    const targets = Object.values(state.regions || {})
+      .filter(r => r.controlledBy === 'SHADOW')
+      .sort((a, b) => a.id.localeCompare(b.id));
+    if (targets.length === 0) {
+      params.innerHTML = `<p class="muted">No Shadow-controlled region available.</p>`;
+    } else {
+      const options = targets.map(r => `<option value="${r.id}">${friendlyRegion(r.id)}</option>`).join('');
+      params.innerHTML = `
+        <div class="form-group">
+          <label>Deploy to Shadow Region</label>
+          <select id="param-targetRegion" class="input-field" onchange="highlightCurrentTarget()">
+            <option value="" disabled selected>Choose region…</option>
+            ${options}
+          </select>
+        </div>
+      `;
+    }
   } else if (orderType === 'FORTIFY_REGION') {
     params.innerHTML = '<p class="muted">Fortifies current region. No params needed.</p>';
     highlightRegion(u.currentRegion);
@@ -578,8 +675,8 @@ function updateRouteBuilder(hiddenId) {
     hidden.value = state.builtRoute.join(',');
   }
 
-  // Repaint the preview line.
-  redrawRoutePreview();
+  // Live-repaint the region layer so route steps glow gold with badges.
+  renderRegionLayer();
 }
 
 function appendRouteStep() {
@@ -639,10 +736,26 @@ async function submitOrder() {
       showToast(`Order submitted: ${formatOrderName(orderType)}`, 'success');
       logEvent(`📤 ${state.units[state.selectedUnitID]?.name}: ${formatOrderName(orderType)}`, 'movement');
       state.hasSubmittedOrder = true;
+      // Track it in the per-turn pending list (capture detail BEFORE we clear builtRouteRegions).
+      pushPendingOrder({
+        unitId: state.selectedUnitID,
+        unitName: state.units[state.selectedUnitID]
+          ? formatUnitName(state.units[state.selectedUnitID].name)
+          : state.selectedUnitID,
+        orderType,
+        payload,
+        turn: state.turn,
+        detail: describeOrderText(orderType, payload, state.builtRouteRegions),
+      });
       // Reset transient route-builder state so the next order starts fresh.
       state.builtRoute = [];
       state.builtRouteRegions = [];
       updatePlayerPlanningStatus();
+      renderRegionLayer(); // clear gold route glow from the map
+      renderUnits();       // mark the unit card with the ✅ "ordered" badge
+      // Swap the right panel to the "locked" view for the unit we just ordered.
+      const justOrdered = state.selectedUnitID;
+      if (justOrdered) selectUnit(justOrdered);
     } else {
       const err = await res.json().catch(() => ({}));
       const code = err.errorCode || res.status;
@@ -863,6 +976,16 @@ const ALL_PATHS = [
 function renderMapMarkers() {
   const container = document.getElementById('unit-markers');
   container.innerHTML = '';
+
+  // Repaint the region controller-tint layer (subtle blue/red/grey under each region).
+  renderRegionLayer();
+  // Action hints based on currently-selected own unit.
+  renderActionHints();
+  // Refresh the textual Action Plan if a unit is still selected.
+  if (state.selectedUnitID) {
+    const su = state.units[state.selectedUnitID];
+    if (su && isOwnUnit(su)) renderActionPlan(su);
+  }
 
   // Dark Side: ghost marker for the last-detected Ring Bearer region
   // (lingers for 2 turns after the detection so the player can react).
@@ -1119,5 +1242,471 @@ function isOwnUnit(u) {
          (state.side === 'dark' && u.side === 'SHADOW');
 }
 
+// ===================== REGION TINT + TOOLTIPS + REACHABILITY GLOW =====================
+// One disc per region, colored by controller. When a unit is selected, the
+// reachable adjacent regions get a soft pulsing glow. When the player is
+// building a route, the route regions get a gold glow with step numbers.
+function renderRegionLayer() {
+  const layer = document.getElementById('region-layer');
+  if (!layer) return;
+  layer.innerHTML = '';
+
+  // Built route step numbers (skip index 0 — starting region).
+  const routeStep = new Map();
+  if (state.builtRouteRegions && state.builtRouteRegions.length > 1) {
+    for (let i = 1; i < state.builtRouteRegions.length; i++) {
+      routeStep.set(state.builtRouteRegions[i], i);
+    }
+  }
+
+  // Compute reachability sets for the currently-selected own unit.
+  // While the player is building a route, reachability is computed from the
+  // TIP of the route (last appended region) — not from the unit's start
+  // position. That way "next legal hop" hints follow the route as you build it.
+  const reachable = new Set();
+  const attackable = new Set();
+  const blocked = new Set();
+  let myRegion = null;
+  let tipRegion = null;
+
+  if (state.selectedUnitID) {
+    const u = state.units[state.selectedUnitID];
+    if (u && isOwnUnit(u)) {
+      myRegion = u.currentRegion;
+      if (u.class === 'RingBearer' && !myRegion) myRegion = 'the-shire';
+
+      // Tip = last region in the route being built; falls back to myRegion.
+      if (state.builtRouteRegions && state.builtRouteRegions.length > 0) {
+        tipRegion = state.builtRouteRegions[state.builtRouteRegions.length - 1];
+      } else {
+        tipRegion = myRegion;
+      }
+
+      if (tipRegion) {
+        ALL_PATHS.forEach(p => {
+          let other = null;
+          if (p.from === tipRegion) other = p.to;
+          else if (p.to === tipRegion) other = p.from;
+          if (!other) return;
+          // Don't overwrite a region that is already part of the route.
+          if (routeStep.has(other) || other === state.builtRouteRegions?.[0]) return;
+          const pathState = state.paths[p.id] || {};
+          if (pathState.status === 'BLOCKED') {
+            blocked.add(other);
+          } else {
+            const hasEnemy = Object.values(state.units).some(en =>
+              en.currentRegion === other && !isOwnUnit(en) && en.status === 'ACTIVE');
+            if (hasEnemy) attackable.add(other);
+            else reachable.add(other);
+          }
+        });
+      }
+    }
+  }
+
+  Object.entries(REGION_POSITIONS).forEach(([id, pos]) => {
+    const region = state.regions[id];
+    const div = document.createElement('div');
+    div.className = 'region-tint';
+
+    const controller = region && region.controlledBy;
+    if (controller === 'FREE_PEOPLES') div.classList.add('ctrl-light');
+    else if (controller === 'SHADOW') div.classList.add('ctrl-shadow');
+    else div.classList.add('ctrl-neutral');
+    if (region && region.fortified) div.classList.add('fortified');
+
+    // State-driven highlight classes (only one of these can apply at once).
+    if (id === myRegion) {
+      div.classList.add('self-region');
+    } else if (routeStep.has(id)) {
+      div.classList.add('in-route');
+      const badge = document.createElement('span');
+      badge.className = 'route-step-badge';
+      badge.textContent = routeStep.get(id);
+      div.appendChild(badge);
+    } else if (attackable.has(id)) {
+      div.classList.add('attack-target');
+    } else if (reachable.has(id)) {
+      div.classList.add('reachable');
+    } else if (blocked.has(id)) {
+      div.classList.add('blocked-target');
+    }
+
+    div.style.left = `${pos.x}%`;
+    div.style.top = `${pos.y}%`;
+    div.dataset.regionId = id;
+
+    // Tooltip handlers — show on hover.
+    div.addEventListener('mouseenter', (e) => showRegionTooltip(id, e));
+    div.addEventListener('mousemove', moveRegionTooltip);
+    div.addEventListener('mouseleave', hideRegionTooltip);
+
+    layer.appendChild(div);
+  });
+}
+
+function buildRegionTooltipHTML(regionId) {
+  const region = state.regions[regionId];
+  const name = friendlyRegion(regionId);
+  const units = Object.values(state.units).filter(u => u.currentRegion === regionId);
+  const myUnits = units.filter(isOwnUnit);
+  const enemyUnits = units.filter(u => !isOwnUnit(u));
+  const isMt = regionId === 'mount-doom';
+
+  let html = `<div class="rt-name">${name}${isMt ? ' 💍' : ''}</div>`;
+  if (region) {
+    const ctl = region.controlledBy === 'FREE_PEOPLES' ? 'Free Peoples (Light)'
+              : region.controlledBy === 'SHADOW'       ? 'Shadow'
+              : 'Neutral';
+    html += `<div class="rt-row"><span>Controller</span><b>${ctl}</b></div>`;
+    html += `<div class="rt-row"><span>Threat</span><b>${region.threatLevel ?? 0}</b></div>`;
+    if (region.fortified) html += `<div class="rt-row rt-warn"><span>Fortified</span><b>+2 defence</b></div>`;
+  }
+  if (myUnits.length) {
+    html += `<div class="rt-row"><span>Your units</span><b>${myUnits.map(u => formatUnitName(u.name)).join(', ')}</b></div>`;
+  }
+  if (enemyUnits.length) {
+    html += `<div class="rt-row rt-danger"><span>Enemy units</span><b>${enemyUnits.map(u => formatUnitName(u.name)).join(', ')}</b></div>`;
+  }
+  if (!myUnits.length && !enemyUnits.length) {
+    html += `<div class="rt-row rt-muted"><span>Units</span><b>(empty)</b></div>`;
+  }
+  return html;
+}
+
+function showRegionTooltip(regionId, e) {
+  const tip = document.getElementById('region-tooltip');
+  if (!tip) return;
+  tip.innerHTML = buildRegionTooltipHTML(regionId);
+  tip.classList.remove('hidden');
+  moveRegionTooltip(e);
+}
+
+function moveRegionTooltip(e) {
+  const tip = document.getElementById('region-tooltip');
+  if (!tip || tip.classList.contains('hidden')) return;
+  const wrapper = document.getElementById('map-wrapper');
+  const rect = wrapper.getBoundingClientRect();
+  let x = e.clientX - rect.left + 14;
+  let y = e.clientY - rect.top + 14;
+  // Keep tooltip on-screen.
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  if (x + tw > rect.width)  x = e.clientX - rect.left - tw - 14;
+  if (y + th > rect.height) y = e.clientY - rect.top - th - 14;
+  tip.style.left = `${x}px`;
+  tip.style.top  = `${y}px`;
+}
+
+function hideRegionTooltip() {
+  const tip = document.getElementById('region-tooltip');
+  if (tip) tip.classList.add('hidden');
+}
+
+// ===================== ACTION HINTS (now: reachability glow on region tints) =====================
+// Reachability is now expressed by glowing the region-tint discs themselves
+// inside renderRegionLayer(). This function stays as a no-op stub so existing
+// call sites keep working.
+function renderActionHints() {
+  const layer = document.getElementById('hints-layer');
+  if (layer) layer.innerHTML = '';
+}
+
+// ===================== COMBAT PREVIEW =====================
+// Mirrors the server's combat formula (Section 4 / combat.go) so the player
+// sees exactly how an attack will resolve BEFORE submitting.
+
+// Terrain bonus per the spec.
+function terrainBonus(terrain) {
+  if (terrain === 'FORTRESS') return 2;
+  if (terrain === 'MOUNTAINS') return 1;
+  return 0;
+}
+
+// Region static info — terrain map mirrors map.conf.
+const REGION_TERRAIN = {
+  'the-shire':'PLAINS','bree':'PLAINS','tharbad':'SWAMP','weathertop':'MOUNTAINS',
+  'rivendell':'MOUNTAINS','fangorn':'FOREST','fords-of-isen':'PLAINS','rohan-plains':'PLAINS',
+  'moria':'MOUNTAINS','helms-deep':'FORTRESS','isengard':'FORTRESS','edoras':'PLAINS',
+  'lothlorien':'FOREST','dead-marshes':'SWAMP','emyn-muil':'MOUNTAINS','minas-tirith':'FORTRESS',
+  'ithilien':'FOREST','osgiliath':'PLAINS','minas-morgul':'FORTRESS','cirith-ungol':'MOUNTAINS',
+  'mordor':'VOLCANIC','mount-doom':'VOLCANIC',
+};
+
+// Best-effort unit profile lookup for fields the server doesn't broadcast
+// (leadership flag, indestructible, ignoresFortress). Mirrors units.conf.
+const UNIT_PROFILE = {
+  'aragorn':         { leadership:true,  bonus:1, indestructible:false, ignoresFortress:false },
+  'legolas':         { leadership:false, bonus:0, indestructible:false, ignoresFortress:false },
+  'gimli':           { leadership:false, bonus:0, indestructible:false, ignoresFortress:false },
+  'rohan-cavalry':   { leadership:false, bonus:0, indestructible:false, ignoresFortress:false },
+  'gondor-army':     { leadership:false, bonus:0, indestructible:false, ignoresFortress:false },
+  'gandalf':         { leadership:false, bonus:0, indestructible:false, ignoresFortress:false },
+  'witch-king':      { leadership:true,  bonus:1, indestructible:true,  ignoresFortress:false },
+  'nazgul-2':        { leadership:false, bonus:0, indestructible:false, ignoresFortress:false },
+  'nazgul-3':        { leadership:false, bonus:0, indestructible:false, ignoresFortress:false },
+  'uruk-hai-legion': { leadership:false, bonus:0, indestructible:false, ignoresFortress:true  },
+  'saruman':         { leadership:false, bonus:0, indestructible:false, ignoresFortress:false },
+  'sauron':          { leadership:false, bonus:0, indestructible:true,  ignoresFortress:false },
+};
+
+function profileOf(unit) {
+  return UNIT_PROFILE[unit.id] || { leadership:false, bonus:0, indestructible:false, ignoresFortress:false };
+}
+
+function applyLeadership(units) {
+  // Sum every leader's bonus; non-leaders receive that sum.
+  let leaderBonus = 0;
+  units.forEach(u => { if (profileOf(u).leadership) leaderBonus += profileOf(u).bonus; });
+  return units.map(u => {
+    const p = profileOf(u);
+    return { unit: u, effective: u.strength + (p.leadership ? 0 : leaderBonus), leaderBonus: p.leadership ? 0 : leaderBonus, profile: p };
+  });
+}
+
+function predictCombat(attackerUnit, targetRegionId) {
+  // Attackers: the selected unit alone (the server allows multi-unit attacks
+  // but each unit gets its own ATTACK_REGION order; preview is per-order).
+  const attackers = [attackerUnit];
+  // Defenders: every enemy ACTIVE unit currently in the target region.
+  const defenders = Object.values(state.units).filter(u =>
+    u.currentRegion === targetRegionId && !isOwnUnit(u) && u.status === 'ACTIVE');
+
+  const effA = applyLeadership(attackers);
+  const effD = applyLeadership(defenders);
+
+  const region = state.regions[targetRegionId] || {};
+  const terrain = REGION_TERRAIN[targetRegionId] || 'PLAINS';
+  const anyIgnores = effA.some(a => a.profile.ignoresFortress);
+  const tb = anyIgnores ? 0 : terrainBonus(terrain);
+  const fb = region.fortified ? 2 : 0;
+
+  const aPower = effA.reduce((s, x) => s + x.effective, 0);
+  const dPower = effD.reduce((s, x) => s + x.effective, 0) + tb + fb;
+
+  return {
+    attackers: effA, defenders: effD,
+    terrain, terrainBonus: tb, fortBonus: fb,
+    anyIgnoresFortress: anyIgnores,
+    attackerPower: aPower, defenderPower: dPower,
+    attackerWins: aPower > dPower,
+    damage: aPower > dPower ? aPower - dPower : 1,
+  };
+}
+
+function onAttackTargetChange() {
+  const sel = document.getElementById('param-targetRegion');
+  const box = document.getElementById('combat-preview');
+  if (!sel || !box) return;
+  const target = sel.value;
+  highlightCurrentTarget();
+  if (!target) { box.classList.add('hidden'); return; }
+  const u = state.units[state.selectedUnitID];
+  if (!u) return;
+
+  const r = predictCombat(u, target);
+
+  const row = (label, value, cls='') =>
+    `<div class="cp-row ${cls}"><span>${label}</span><b>${value}</b></div>`;
+
+  const breakdown = (side, items, extra = '') => {
+    if (items.length === 0) return `<div class="cp-side"><div class="cp-side-title">${side}</div><div class="cp-empty">(none)</div></div>`;
+    return `<div class="cp-side"><div class="cp-side-title">${side}</div>` +
+      items.map(x => {
+        const p = x.profile;
+        const parts = [`${x.unit.strength}`];
+        if (x.leaderBonus) parts.push(`+${x.leaderBonus} lead`);
+        const tags = [];
+        if (p.indestructible) tags.push('🛡 indestructible');
+        if (p.ignoresFortress) tags.push('⚔ ignores fortress');
+        return `<div class="cp-unit"><span>${formatUnitName(x.unit.name)}</span><b>${parts.join(' ')} = ${x.effective}</b>${tags.length?`<small>${tags.join(' · ')}</small>`:''}</div>`;
+      }).join('') + extra + '</div>';
+  };
+
+  const verdictClass = r.attackerWins ? 'cp-win' : 'cp-lose';
+  const verdictText  = r.attackerWins
+    ? `✅ You win — defenders take <b>${r.damage}</b> damage, region falls to you`
+    : `❌ Defenders hold — every attacker loses <b>1</b> strength, no region change`;
+
+  // Defender-side modifiers
+  let defExtra = '';
+  if (r.terrainBonus > 0) defExtra += `<div class="cp-mod">+${r.terrainBonus} ${r.terrain} terrain</div>`;
+  else if (r.anyIgnoresFortress && (REGION_TERRAIN[target]==='FORTRESS' || REGION_TERRAIN[target]==='MOUNTAINS'))
+    defExtra += `<div class="cp-mod">⚔ Uruk-hai ignores ${r.terrain} terrain bonus</div>`;
+  if (r.fortBonus > 0) defExtra += `<div class="cp-mod">+${r.fortBonus} FORTIFIED</div>`;
+
+  box.classList.remove('hidden');
+  box.innerHTML = `
+    <div class="cp-header">Combat Preview — ${friendlyRegion(target)}</div>
+    <div class="cp-cols">
+      ${breakdown('⚔ Attacker', r.attackers)}
+      ${breakdown('🛡 Defender', r.defenders, defExtra)}
+    </div>
+    ${row('Attacker total', r.attackerPower, 'cp-total')}
+    ${row('Defender total', r.defenderPower, 'cp-total')}
+    <div class="cp-verdict ${verdictClass}">${verdictText}</div>
+    <div class="cp-foot">Preview uses live game state. Real combat is resolved server-side at turn end.</div>
+  `;
+}
+
+// ===================== ACTION PLAN (right sidebar) =====================
+// Textual companion to the on-map hints. Tells the player exactly what
+// they can do with the currently-selected unit.
+function renderActionPlan(u) {
+  const panel = document.getElementById('action-plan');
+  if (!panel) return;
+
+  let myRegion = u.currentRegion;
+  if (u.class === 'RingBearer' && !myRegion) myRegion = 'the-shire';
+
+  const moves = [], attacks = [], blocked = [], allyJoin = [];
+  ALL_PATHS.forEach(p => {
+    let other = null;
+    if (p.from === myRegion) other = p.to;
+    else if (p.to === myRegion) other = p.from;
+    if (!other) return;
+    const pathState = state.paths[p.id] || {};
+    const enemies = Object.values(state.units).filter(en =>
+      en.currentRegion === other && !isOwnUnit(en) && en.status === 'ACTIVE');
+    const allies = Object.values(state.units).filter(al =>
+      al.currentRegion === other && isOwnUnit(al) && al.status === 'ACTIVE' && al.id !== u.id);
+    const item = {
+      region: other, name: friendlyRegion(other),
+      surveilled: (pathState.surveillanceLevel || 0) > 0,
+      enemies, allies,
+    };
+    if (pathState.status === 'BLOCKED') blocked.push(item);
+    else if (enemies.length) attacks.push(item);
+    else if (allies.length) allyJoin.push(item);
+    else moves.push(item);
+  });
+
+  const row = (icon, label, items, mapFn) => items.length === 0 ? '' : `
+    <div class="ap-row">
+      <div class="ap-label">${icon} ${label}</div>
+      <div class="ap-list">${items.map(mapFn).join('')}</div>
+    </div>`;
+
+  const moveItem = i => `<span class="ap-chip ap-move${i.surveilled ? ' surveilled' : ''}" title="${i.surveilled ? 'surveilled path — Frodo would be exposed' : 'open path'}">${i.name}${i.surveilled ? ' ⚠' : ''}</span>`;
+  const atkItem  = i => `<span class="ap-chip ap-attack" title="${i.enemies.map(e=>formatUnitName(e.name)+' ('+e.strength+'⚔)').join(', ')}">${i.name} ⚔️</span>`;
+  const allyItem = i => `<span class="ap-chip ap-ally" title="${i.allies.map(e=>formatUnitName(e.name)).join(', ')}">${i.name} 🛡</span>`;
+  const blkItem  = i => `<span class="ap-chip ap-blocked" title="path BLOCKED">${i.name} 🚫</span>`;
+
+  let html = `<div class="ap-header">📍 ${friendlyRegion(myRegion)}</div>`;
+  html += row('🟢', 'Safe to move:', moves, moveItem);
+  html += row('⚔️', 'Can attack:', attacks, atkItem);
+  html += row('🛡', 'Join ally:', allyJoin, allyItem);
+  html += row('🚫', 'Blocked:', blocked, blkItem);
+  if (!moves.length && !attacks.length && !allyJoin.length && !blocked.length) {
+    html += `<div class="ap-empty">No adjacent regions.</div>`;
+  }
+  panel.innerHTML = html;
+}
+
+// ===================== PENDING ORDERS PANEL =====================
+// Shows orders the player has queued THIS turn. Clears automatically when
+// the server publishes a new turn (handled in updateWorldState).
+function pushPendingOrder(entry) {
+  if (!Array.isArray(state.myPendingOrders)) state.myPendingOrders = [];
+  state.myPendingOrders.push(entry);
+  renderPendingOrders();
+}
+
+function orderIcon(t) {
+  return ({
+    ASSIGN_ROUTE:    '🛣',
+    REDIRECT_UNIT:   '↪',
+    BLOCK_PATH:      '🚧',
+    SEARCH_PATH:     '🔍',
+    MAIA_ABILITY:    '✨',
+    FORTIFY_REGION:  '🛡',
+    ATTACK_REGION:   '⚔️',
+    REINFORCE_REGION:'➡️',
+    DEPLOY_NAZGUL:   '👁️',
+    DESTROY_RING:    '💍',
+  })[t] || '📋';
+}
+
+function pathReadable(pathId) {
+  const p = ALL_PATHS.find(x => x.id === pathId);
+  if (!p) return pathId;
+  return `${friendlyRegion(p.from)} ↔ ${friendlyRegion(p.to)}`;
+}
+
+function describeOrderText(orderType, payload, builtRouteRegions) {
+  switch (orderType) {
+    case 'ASSIGN_ROUTE':
+    case 'REDIRECT_UNIT': {
+      if (builtRouteRegions && builtRouteRegions.length > 1) {
+        return builtRouteRegions.map(friendlyRegion).join(' → ');
+      }
+      const ids = payload.pathIds || payload.newPathIds || [];
+      return ids.length ? ids.map(pathReadable).join(' → ') : '(empty route)';
+    }
+    case 'BLOCK_PATH':       return `Block ${pathReadable(payload.pathId)}`;
+    case 'SEARCH_PATH':      return `Search ${pathReadable(payload.pathId)}`;
+    case 'MAIA_ABILITY':     return `Ability on ${pathReadable(payload.targetPathId)}`;
+    case 'FORTIFY_REGION':   return `Fortify current region`;
+    case 'ATTACK_REGION':    return `Attack ${friendlyRegion(payload.targetRegion)}`;
+    case 'REINFORCE_REGION': return `Move to ${friendlyRegion(payload.targetRegion)}`;
+    case 'DEPLOY_NAZGUL':    return `Deploy at ${friendlyRegion(payload.targetRegion)}`;
+    case 'DESTROY_RING':     return `Destroy the One Ring`;
+    default:                 return '';
+  }
+}
+
+function renderPendingOrders() {
+  const panel = document.getElementById('pending-orders');
+  const counter = document.getElementById('pending-count');
+  if (!panel) return;
+
+  const orders = state.myPendingOrders || [];
+  if (counter) counter.textContent = orders.length;
+
+  if (orders.length === 0) {
+    panel.innerHTML = `<p class="muted">No orders queued yet.</p>`;
+    return;
+  }
+
+  // Detect duplicates (server keeps only the first per unit per turn).
+  const seenUnit = new Set();
+  panel.innerHTML = orders.map((o, i) => {
+    const isDup = seenUnit.has(o.unitId);
+    if (!isDup) seenUnit.add(o.unitId);
+    const dupNote = isDup
+      ? `<div class="po-dup">⚠ Duplicate — server will ignore this; first order for this unit wins.</div>`
+      : '';
+    return `
+      <div class="pending-order ${isDup ? 'is-dup' : ''}">
+        <span class="po-idx">#${i + 1}</span>
+        <span class="po-icon">${orderIcon(o.orderType)}</span>
+        <div class="po-body">
+          <div class="po-unit">${o.unitName}</div>
+          <div class="po-type">${formatOrderName(o.orderType)}</div>
+          <div class="po-detail">${o.detail || ''}</div>
+          ${dupNote}
+        </div>
+      </div>`;
+  }).join('');
+}
+
+// Auto-detect the server URL from the page origin so the same UI works whether
+// it's loaded from http://localhost:8080 (direct Go), http://localhost (nginx),
+// or a public tunnel like https://*.ngrok-free.dev.
+function autoFillServerURL() {
+  const input = document.getElementById('server-url');
+  if (!input || input.value) return;
+  const loc = window.location;
+  // Direct-mode dev: page came from the Go binary on :8080 → use it.
+  // Anything else (nginx, ngrok, cloudflared, deploy): same origin as the page.
+  if (loc.hostname === 'localhost' && loc.port === '') {
+    input.value = 'http://localhost'; // nginx default
+  } else {
+    input.value = loc.origin;
+  }
+}
+
 // Initialize map controls on load
-document.addEventListener('DOMContentLoaded', setupMapControls);
+document.addEventListener('DOMContentLoaded', () => {
+  setupMapControls();
+  autoFillServerURL();
+});

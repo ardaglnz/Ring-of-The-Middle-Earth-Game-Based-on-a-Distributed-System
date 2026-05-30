@@ -320,8 +320,23 @@ func (tp *TurnProcessor) applyReinforce(c *cache.WorldStateCache, o Order) {
 		return
 	}
 	u, ok := c.Units[o.UnitID]
-	if !ok {
+	if !ok || u.Status != cache.UnitActive {
 		return
+	}
+	// REINFORCE_REGION: must be adjacent. DEPLOY_NAZGUL bypasses this check
+	// because it represents a Shadow-side respawn-style placement.
+	if o.OrderType == OrderReinforce && u.Region != p.TargetRegion {
+		pathID := tp.graph.PathBetween(u.Region, p.TargetRegion)
+		if pathID == "" {
+			log.Printf("[engine] INVALID_TARGET: reinforce target %s not adjacent to %s (%s)",
+				p.TargetRegion, u.Region, o.UnitID)
+			return
+		}
+		if path, ok := c.Paths[pathID]; ok && path.Status == cache.StatusBlocked {
+			log.Printf("[engine] PATH_BLOCKED: cannot reinforce %s via blocked %s",
+				p.TargetRegion, pathID)
+			return
+		}
 	}
 	u.Region = p.TargetRegion
 	c.Units[o.UnitID] = u

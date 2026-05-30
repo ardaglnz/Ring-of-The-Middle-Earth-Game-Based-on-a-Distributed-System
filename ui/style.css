@@ -254,6 +254,20 @@ html, body {
 .unit-card:hover { border-color: var(--gold-dark); background: rgba(212,168,83,0.08); }
 .unit-card.selected { border-color: var(--gold); background: rgba(212,168,83,0.12); }
 .unit-card.destroyed { opacity: 0.4; pointer-events: none; }
+.unit-card.has-order {
+  background: rgba(46, 204, 113, 0.08);
+  border-color: rgba(46, 204, 113, 0.45);
+}
+.unit-card.has-order.selected {
+  background: rgba(46, 204, 113, 0.16);
+  border-color: rgba(46, 204, 113, 0.85);
+}
+.unit-ordered-badge {
+  display: inline-block;
+  margin-left: 0.35rem;
+  font-size: 0.8rem;
+  vertical-align: middle;
+}
 
 .unit-name { font-weight: 600; font-size: 0.9rem; color: var(--text); }
 .unit-meta { font-size: 0.75rem; color: var(--text-muted); display: flex; gap: 0.5rem; margin-top: 2px; }
@@ -396,18 +410,18 @@ html, body {
 
 /* ---- UNIT MARKER (on map) ---- */
 .unit-marker {
-  position: absolute; width: 24px; height: 24px;
+  position: absolute; width: 20px; height: 20px;
   border-radius: 50%; border: 2px solid #fff;
   display: flex; align-items: center; justify-content: center;
-  font-size: 10px; font-weight: bold; pointer-events: auto;
+  font-size: 9px; font-weight: bold; pointer-events: auto;
   cursor: pointer; transform: translate(-50%, -50%);
-  transition: transform 0.3s ease, box-shadow 0.3s;
+  transition: transform 0.2s ease, box-shadow 0.2s;
   z-index: 5;
 }
 
-.unit-marker:hover { transform: translate(-50%,-50%) scale(1.3); }
+.unit-marker:hover { transform: translate(-50%,-50%) scale(1.4); z-index: 11; }
 .unit-marker.selected-marker {
-  box-shadow: 0 0 12px var(--gold-light), 0 0 24px var(--gold) !important;
+  box-shadow: 0 0 10px var(--gold-light), 0 0 20px var(--gold) !important;
   border-color: var(--gold-light) !important;
   transform: translate(-50%, -50%) scale(1.4);
   z-index: 10;
@@ -440,18 +454,26 @@ html, body {
   top: 110%;
   left: 50%;
   transform: translateX(-50%);
-  background: rgba(0,0,0,0.7);
+  background: rgba(0,0,0,0.85);
   padding: 2px 6px;
   border-radius: 4px;
   color: white;
   font-size: 8px;
-  max-width: 60px;
+  max-width: 80px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   pointer-events: none;
   font-family: 'Cinzel', serif;
   font-weight: bold;
+  opacity: 0;                /* hidden by default — clears the map */
+  transition: opacity 0.15s ease;
+}
+
+/* Show the name only on hover or when the marker is selected. */
+.unit-marker:hover .marker-label,
+.unit-marker.selected-marker .marker-label {
+  opacity: 1;
 }
 
 /* ---- SCROLLBAR ---- */
@@ -641,6 +663,438 @@ html, body {
 .route-builder-select-wrap {
   display: flex;
   gap: 0.4rem;
+}
+
+/* ---- Map overlay layers (under unit markers) ---- */
+.overlay-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+#hints-layer { z-index: 4; }
+.map-canvas  { z-index: 1; }
+.unit-markers { z-index: 5; }
+
+/* ---- Region controller tint (very small dot under each region) ---- */
+/* Kept tiny and subtle so it doesn't compete with the SVG labels. */
+.region-tint {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;   /* needs hover for the tooltip */
+  cursor: help;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  background: transparent;
+}
+
+.region-tint.ctrl-light    { box-shadow: 0 0 0 2px rgba(74,158,255,0.55); }
+.region-tint.ctrl-shadow   { box-shadow: 0 0 0 2px rgba(192,57,43,0.65); }
+.region-tint.ctrl-neutral  { box-shadow: 0 0 0 1px rgba(255,255,255,0.20); }
+.region-tint.fortified     { box-shadow: 0 0 0 2px var(--gold-light), 0 0 6px rgba(212,168,83,0.55); }
+
+.region-tint:hover {
+  transform: translate(-50%, -50%) scale(1.4);
+  box-shadow: 0 0 0 2px var(--gold-light), 0 0 10px rgba(212,168,83,0.7);
+}
+
+/* ---- Region hover tooltip ---- */
+.region-tooltip {
+  position: absolute;
+  z-index: 30;
+  min-width: 200px;
+  max-width: 280px;
+  padding: 0.55rem 0.75rem;
+  background: rgba(18, 14, 8, 0.96);
+  border: 1px solid var(--gold-dark);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 0.78rem;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.65);
+  pointer-events: none;
+  line-height: 1.35;
+}
+.region-tooltip .rt-name {
+  font-family: 'Cinzel', serif;
+  font-size: 0.95rem;
+  color: var(--gold-light);
+  margin-bottom: 0.35rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid rgba(212,168,83,0.25);
+}
+.region-tooltip .rt-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 1px 0;
+}
+.region-tooltip .rt-row span { color: var(--text-muted); }
+.region-tooltip .rt-row b    { color: var(--text); font-weight: 600; }
+.region-tooltip .rt-row.rt-warn   b { color: var(--gold-light); }
+.region-tooltip .rt-row.rt-danger b { color: #ff8888; }
+.region-tooltip .rt-row.rt-muted  b { color: var(--text-muted); font-style: italic; }
+
+/* ---- Region reachability / route glow ---- */
+/* These classes are stacked on top of .region-tint to express state:
+     .self-region    — selected unit is here (gold)
+     .reachable      — empty adjacent region you can move into (green pulse)
+     .attack-target  — adjacent region with an enemy you can attack (red pulse)
+     .blocked-target — adjacent via a BLOCKED path (dim grey)
+     .in-route       — region is part of the route you are building (gold + step badge)
+*/
+.region-tint.self-region {
+  box-shadow: 0 0 0 3px var(--gold-light), 0 0 14px rgba(212, 168, 83, 0.85);
+  background: radial-gradient(circle, rgba(212, 168, 83, 0.30) 0%, rgba(212, 168, 83, 0) 70%);
+}
+
+.region-tint.reachable {
+  animation: reachGlow 2.0s infinite ease-in-out;
+}
+.region-tint.attack-target {
+  animation: attackGlow 1.4s infinite ease-in-out;
+  cursor: crosshair;
+}
+.region-tint.blocked-target {
+  box-shadow: 0 0 0 2px rgba(150, 150, 150, 0.5);
+  opacity: 0.45;
+}
+.region-tint.in-route {
+  background: radial-gradient(circle, rgba(212, 168, 83, 0.40) 0%, rgba(212, 168, 83, 0) 70%);
+  box-shadow: 0 0 0 2px var(--gold-light), 0 0 12px rgba(212, 168, 83, 0.85);
+  width: 26px;
+  height: 26px;
+}
+
+@keyframes reachGlow {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(46, 204, 113, 0.35), 0 0 4px  rgba(46, 204, 113, 0.25); }
+  50%      { box-shadow: 0 0 0 3px rgba(46, 204, 113, 0.75), 0 0 14px rgba(46, 204, 113, 0.65); }
+}
+@keyframes attackGlow {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(192, 57, 43, 0.50), 0 0 6px  rgba(192, 57, 43, 0.40); }
+  50%      { box-shadow: 0 0 0 4px rgba(192, 57, 43, 0.85), 0 0 16px rgba(192, 57, 43, 0.75); }
+}
+
+/* Numbered step badge attached to a route region */
+.route-step-badge {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  background: var(--gold-light);
+  color: var(--deep-black);
+  font-family: 'Cinzel', serif;
+  font-size: 10px;
+  font-weight: 700;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--gold-dark);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.6);
+  pointer-events: none;
+}
+
+/* ---- Action Plan panel (right sidebar) ---- */
+.action-plan {
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(212, 168, 83, 0.20);
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.78rem;
+  margin-bottom: 0.4rem;
+}
+.action-plan .ap-header {
+  font-family: 'Cinzel', serif;
+  font-size: 0.88rem;
+  color: var(--gold-light);
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid rgba(212, 168, 83, 0.20);
+}
+.action-plan .ap-row {
+  margin: 0.35rem 0;
+}
+.action-plan .ap-label {
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-bottom: 0.2rem;
+  letter-spacing: 0.02em;
+}
+.action-plan .ap-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.action-plan .ap-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.18rem 0.45rem;
+  border-radius: 12px;
+  font-size: 0.74rem;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.04);
+  white-space: nowrap;
+}
+.action-plan .ap-chip.ap-move    { color: #6fe19c; border-color: rgba(46, 204, 113, 0.45); }
+.action-plan .ap-chip.ap-move.surveilled { color: #ffb46f; border-color: rgba(255, 107, 53, 0.55); }
+.action-plan .ap-chip.ap-attack  { color: #ff9b8a; border-color: rgba(192, 57, 43, 0.55); background: rgba(192,57,43,0.10); }
+.action-plan .ap-chip.ap-ally    { color: var(--light-blue); border-color: rgba(74, 158, 255, 0.50); }
+.action-plan .ap-chip.ap-blocked { color: #c8c8c8; border-color: rgba(150, 150, 150, 0.4); text-decoration: line-through; opacity: 0.75; }
+.action-plan .ap-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 0.3rem 0;
+}
+
+/* ---- Combat Preview panel ---- */
+.combat-preview {
+  margin-top: 0.5rem;
+  padding: 0.7rem 0.8rem;
+  background: rgba(20, 14, 8, 0.55);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  font-size: 0.78rem;
+  color: var(--text);
+}
+.combat-preview .cp-header {
+  font-family: 'Cinzel', serif;
+  font-size: 0.88rem;
+  color: var(--gold-light);
+  text-align: center;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid rgba(212, 168, 83, 0.25);
+}
+.combat-preview .cp-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+.combat-preview .cp-side {
+  background: rgba(0,0,0,0.25);
+  border-radius: 6px;
+  padding: 0.4rem 0.5rem;
+}
+.combat-preview .cp-side-title {
+  font-weight: 700;
+  color: var(--gold);
+  font-size: 0.75rem;
+  margin-bottom: 0.25rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.combat-preview .cp-unit {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  padding: 2px 0;
+}
+.combat-preview .cp-unit b { color: var(--text); font-weight: 700; }
+.combat-preview .cp-unit small {
+  flex-basis: 100%;
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 0.7rem;
+}
+.combat-preview .cp-mod {
+  font-size: 0.72rem;
+  color: var(--gold-light);
+  margin-top: 0.2rem;
+}
+.combat-preview .cp-empty {
+  font-style: italic;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+.combat-preview .cp-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 4px;
+  font-size: 0.78rem;
+}
+.combat-preview .cp-row b { color: var(--gold-light); }
+.combat-preview .cp-row.cp-total {
+  font-weight: 700;
+  border-top: 1px dashed rgba(212, 168, 83, 0.2);
+  padding-top: 4px;
+  margin-top: 2px;
+}
+.combat-preview .cp-verdict {
+  margin-top: 0.5rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  text-align: center;
+}
+.combat-preview .cp-verdict.cp-win {
+  background: rgba(46, 204, 113, 0.16);
+  border: 1px solid rgba(46, 204, 113, 0.6);
+  color: #2ecc71;
+}
+.combat-preview .cp-verdict.cp-lose {
+  background: rgba(192, 57, 43, 0.18);
+  border: 1px solid rgba(192, 57, 43, 0.65);
+  color: #ff9b8a;
+}
+.combat-preview .cp-foot {
+  margin-top: 0.4rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-style: italic;
+  text-align: center;
+}
+
+/* ---- "Already ordered" lock panel (replaces order form for that unit) ---- */
+.already-ordered {
+  text-align: center;
+  padding: 0.5rem 0.3rem;
+}
+.already-ordered .ao-check {
+  font-size: 2.2rem;
+  margin-bottom: 0.3rem;
+  filter: drop-shadow(0 0 8px rgba(46, 204, 113, 0.6));
+}
+.already-ordered .ao-title {
+  font-family: 'Cinzel', serif;
+  color: var(--gold-light);
+  font-size: 0.95rem;
+  margin-bottom: 0.6rem;
+}
+.already-ordered .ao-card {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 0.7rem;
+  background: rgba(46, 204, 113, 0.08);
+  border: 1px solid rgba(46, 204, 113, 0.40);
+  border-radius: 8px;
+  text-align: left;
+  margin-bottom: 0.6rem;
+}
+.already-ordered .ao-icon { font-size: 1.4rem; }
+.already-ordered .ao-body { flex: 1; min-width: 0; }
+.already-ordered .ao-type {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 2px;
+}
+.already-ordered .ao-detail {
+  font-size: 0.85rem;
+  color: var(--text);
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+.already-ordered .ao-note {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-style: italic;
+  line-height: 1.4;
+}
+
+/* ---- Pending Orders panel ---- */
+.pending-orders {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+
+.pending-count {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0 0.4rem;
+  background: var(--gold-dark);
+  color: var(--deep-black);
+  border-radius: 9px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  vertical-align: middle;
+}
+
+.pending-order {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.45rem 0.55rem;
+  background: rgba(0, 0, 0, 0.30);
+  border: 1px solid rgba(212, 168, 83, 0.20);
+  border-left: 3px solid var(--gold);
+  border-radius: 6px;
+  font-size: 0.78rem;
+  position: relative;
+  animation: poFadeIn 0.25s ease;
+}
+
+@keyframes poFadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.pending-order.is-dup {
+  border-left-color: var(--crimson-bright);
+  opacity: 0.72;
+}
+
+.pending-order .po-idx {
+  font-family: 'Cinzel', serif;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  min-width: 1.4rem;
+}
+
+.pending-order .po-icon {
+  font-size: 1.1rem;
+  line-height: 1;
+  margin-top: 1px;
+}
+
+.pending-order .po-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.pending-order .po-unit {
+  font-weight: 700;
+  color: var(--gold-light);
+  font-size: 0.8rem;
+}
+
+.pending-order .po-type {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.pending-order .po-detail {
+  font-size: 0.78rem;
+  color: var(--text);
+  margin-top: 2px;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+
+.pending-order .po-dup {
+  margin-top: 0.3rem;
+  padding: 0.25rem 0.4rem;
+  background: rgba(192, 57, 43, 0.18);
+  border-left: 2px solid var(--crimson-bright);
+  border-radius: 3px;
+  font-size: 0.7rem;
+  color: #ff9b8a;
+  font-style: italic;
 }
 
 /* ---- Ring Bearer Last-Seen Ghost (Dark Side only) ---- */

@@ -32,7 +32,7 @@
       </div>
       <div class="server-config">
         <label>Server URL</label>
-        <input id="server-url" type="text" value="http://localhost:8080" class="input-field" />
+        <input id="server-url" type="text" class="input-field" />
         <input id="player-id" type="text" placeholder="Player ID (e.g. light-player1)" class="input-field" />
         <button id="btn-connect" class="btn-primary" onclick="connect()">Connect &amp; Join Game</button>
       </div>
@@ -80,7 +80,10 @@
           <div class="map-wrapper" id="map-wrapper">
             <object id="map-svg" data="MiddleEarthMap.svg?v=2" type="image/svg+xml" class="map-svg"></object>
             <canvas id="map-canvas" class="map-canvas"></canvas>
+            <div id="region-layer" class="overlay-layer"></div>
+            <div id="hints-layer" class="overlay-layer"></div>
             <div id="unit-markers" class="unit-markers"></div>
+            <div id="region-tooltip" class="region-tooltip hidden"></div>
           </div>
           <div class="map-controls glass">
             <button class="btn-icon" onclick="zoomMap(0.2)" title="Zoom In">➕</button>
@@ -105,12 +108,20 @@
             <label>Selected Unit</label>
             <div id="sel-unit-name" class="info-value"></div>
           </div>
+          <div id="action-plan" class="action-plan"></div>
           <div class="form-group">
             <label>Order Type</label>
             <select id="order-type" class="input-field" onchange="onOrderTypeChange()"></select>
           </div>
           <div id="order-params" class="order-params"></div>
           <button class="btn-primary" onclick="submitOrder()">Submit Order</button>
+        </div>
+
+        <div class="divider"></div>
+
+        <h3 class="panel-title">📜 This Turn's Orders <span id="pending-count" class="pending-count">0</span></h3>
+        <div id="pending-orders" class="pending-orders">
+          <p class="muted">No orders queued yet.</p>
         </div>
 
         <div class="divider"></div>
