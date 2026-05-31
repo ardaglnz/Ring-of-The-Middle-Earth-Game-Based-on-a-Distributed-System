@@ -1121,3 +1121,19 @@ html, body {
   50%      { opacity: 1.0;  box-shadow: 0 0 16px rgba(192,57,43,0.8); }
 }
 
+
+.game-over-overlay {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(10, 10, 12, 0.9);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--gold);
+  text-align: center;
+}
+.game-over-overlay.hidden { display: none; }
+.game-over-overlay h1 { font-size: 4rem; margin: 0; text-shadow: 0 0 20px var(--gold); }
+.game-over-overlay p { font-size: 1.5rem; color: #fff; margin-bottom: 2rem; }

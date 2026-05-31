@@ -1,12 +1,3 @@
-// Package main is the entry point for the Ring of the Middle Earth game server.
-// Goroutine architecture matches Section 28:
-//   - KafkaConsumer goroutines (one per subscribed topic)
-//   - EventRouter goroutine
-//   - CacheManager goroutine
-//   - TurnProcessor goroutine
-//   - Pipeline 1 & 2 goroutines
-//   - SSE goroutines (one per player)
-//   - HTTP server goroutine
 package main
 
 import (
@@ -15,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/rotr/option-b/internal/api"
 	"github.com/rotr/option-b/internal/cache"
@@ -28,63 +20,69 @@ import (
 func main() {
 	log.Println("[main] Ring of the Middle Earth — starting up")
 
-	// Resolve config paths.
 	configDir := os.Getenv("CONFIG_DIR")
 	if configDir == "" {
 		configDir = filepath.Join("..", "config")
 	}
 
-	// Load unit config.
 	gc, err := config.LoadGameConfig(filepath.Join(configDir, "units.conf"))
 	if err != nil {
 		log.Fatalf("[main] Failed to load units.conf: %v", err)
 	}
 	log.Printf("[main] Loaded %d units", len(gc.Units))
 
-	// Load map config.
 	mc, err := config.LoadMapConfig(filepath.Join(configDir, "map.conf"))
 	if err != nil {
 		log.Fatalf("[main] Failed to load map.conf: %v", err)
 	}
 	log.Printf("[main] Loaded %d regions, %d paths", len(mc.Regions), len(mc.Paths))
 
-	// Build graph.
 	g := graph.Build(mc)
 	log.Println("[main] Graph built")
 
-	// Initialise world state cache.
 	worldCache := cache.NewWorldStateCache(gc, mc)
 
-	// Create Kafka mock producer (real producer injected in production via env).
 	mockProducer := &kafka.MockProducer{}
 	emitter := kafka.NewGameEventEmitter(mockProducer)
 
-	// Create turn processor.
 	tp := engine.New(worldCache, g, gc, emitter)
-	_ = tp // used by TurnProcessor goroutine below
+	_ = tp
 
-	// SSE channels — separate for each side.
 	lightSideSSECh := make(chan router.Event, 100)
 	darkSideSSECh := make(chan router.Event, 100)
 	cacheUpdateCh := make(chan router.Event, 100)
 	engineCh := make(chan router.Event, 100)
 
-	// Create EventRouter.
 	r := &router.Router{
 		LightSideSSECh: lightSideSSECh,
 		DarkSideSSECh:  darkSideSSECh,
 		CacheUpdateCh:  cacheUpdateCh,
 		EngineCh:       engineCh,
 	}
-	_ = r // used by KafkaConsumer goroutines
+	_ = r
 
-	// Create HTTP server.
-	srv := api.New(worldCache, g, gc, lightSideSSECh, darkSideSSECh, cacheUpdateCh, engineCh)
+	// PEER_ADDRS: comma-separated list of peer instance base URLs.
+	// Set in docker-compose per instance:
+	//   go-1: PEER_ADDRS=http://go-2:8080,http://go-3:8080
+	//   go-2: PEER_ADDRS=http://go-1:8080,http://go-3:8080
+	//   go-3: PEER_ADDRS=http://go-1:8080,http://go-2:8080
+	var peerAddrs []string
+	if raw := os.Getenv("PEER_ADDRS"); raw != "" {
+		for _, addr := range strings.Split(raw, ",") {
+			if addr = strings.TrimSpace(addr); addr != "" {
+				peerAddrs = append(peerAddrs, addr)
+			}
+		}
+		log.Printf("[main] Peer addresses: %v", peerAddrs)
+	}
+
+	srv := api.New(worldCache, g, gc, lightSideSSECh, darkSideSSECh, cacheUpdateCh, engineCh, peerAddrs)
 
 	mux := http.NewServeMux()
 	srv.RegisterRoutes(mux)
 
-	// Serve static UI files from the ui/ directory.
+	// Serve static UI files — nginx also serves these, but this fallback
+	// allows direct access to go-1:8080 without nginx for local dev.
 	uiDir := filepath.Join(configDir, "..", "ui")
 	if _, err := os.Stat(uiDir); err == nil {
 		log.Printf("[main] Serving static UI from %s", uiDir)
@@ -92,7 +90,6 @@ func main() {
 		mux.Handle("/", fs)
 	}
 
-	// HTTP server goroutine.
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -106,7 +103,6 @@ func main() {
 		}
 	}()
 
-	// Main select loop (runs in main goroutine via srv.Run).
 	ctx := context.Background()
 	srv.Run(ctx)
 

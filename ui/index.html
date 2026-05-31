@@ -78,7 +78,7 @@
       <main class="map-area">
         <div class="map-container" id="map-container">
           <div class="map-wrapper" id="map-wrapper">
-            <object id="map-svg" data="MiddleEarthMap.svg?v=2" type="image/svg+xml" class="map-svg"></object>
+            <object id="map-svg" data="MiddleEarthMap.svg?v=3" type="image/svg+xml" class="map-svg"></object>
             <canvas id="map-canvas" class="map-canvas"></canvas>
             <div id="region-layer" class="overlay-layer"></div>
             <div id="hints-layer" class="overlay-layer"></div>
@@ -94,6 +94,11 @@
         <div id="event-log" class="event-log glass">
           <h4>📜 Event Log</h4>
           <div id="event-entries"></div>
+        </div>
+        <div id="game-over-overlay" class="game-over-overlay hidden">
+          <h1 id="game-over-title">VICTORY</h1>
+          <p id="game-over-subtitle">The Ring has been destroyed.</p>
+          <button class="btn-primary" onclick="location.reload()">Play Again</button>
         </div>
       </main>
 

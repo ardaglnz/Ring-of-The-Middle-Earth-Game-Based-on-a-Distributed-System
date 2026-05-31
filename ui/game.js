@@ -102,7 +102,7 @@ async function closeHowToPlayModal() {
   try {
     await fetch(`${state.serverURL}/game/start`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
       body: JSON.stringify({ mode: 'HVH' }),
     });
   } catch (e) {
@@ -117,12 +117,14 @@ async function closeHowToPlayModal() {
 }
 
 async function connect() {
-  const url = document.getElementById('server-url').value.trim();
+  let url = document.getElementById('server-url').value.trim();
   const pid = document.getElementById('player-id').value.trim();
 
   if (!pid) { showToast('Enter a Player ID', 'error'); return; }
   if (!state.side) { showToast('Choose a side first', 'error'); return; }
 
+  // Strip trailing slashes
+  url = url.replace(/\/+$/, '');
   state.serverURL = url;
   state.playerID = pid;
 
@@ -159,6 +161,13 @@ function handleServerEvent(data) {
   if (data.turn !== undefined) {
     updateWorldState(data);
   }
+  
+  if (data.turnLogs && Array.isArray(data.turnLogs)) {
+    data.turnLogs.forEach(msg => {
+      logEvent(`[Server] ${msg}`, 'system');
+    });
+  }
+
   if (data.winner) {
     showGameOver(data.winner, data.cause);
   }
@@ -171,6 +180,10 @@ function handleServerEvent(data) {
     state.lastDetectedTurn = state.turn;
     renderMapMarkers();
   }
+  if (data.type === 'RingBearerSpotted') {
+    logEvent(`🔴 Ring Bearer SPOTTED on path ${data.pathId}!`, 'detection');
+    showToast(`Ring Bearer spotted on path ${data.pathId}!`, 'error');
+  }
   if (data.type === 'RingBearerMoved') {
     // Light Side only.
     logEvent(`💍 Ring Bearer moved to ${friendlyRegion(data.trueRegion)}`, 'movement');
@@ -180,7 +193,7 @@ function handleServerEvent(data) {
 // ===================== GAME STATE =====================
 async function fetchGameState() {
   try {
-    const res = await fetch(`${state.serverURL}/game/state?playerId=${encodeURIComponent(state.playerID)}`);
+    const res = await fetch(`${state.serverURL}/game/state?playerId=${encodeURIComponent(state.playerID)}`, { headers: { 'ngrok-skip-browser-warning': 'true' } });
     if (!res.ok) return;
     const data = await res.json();
     updateWorldState(data);
@@ -244,6 +257,16 @@ function updateWorldState(data) {
     } else {
       state.paths = data.paths;
     }
+  }
+
+  // Handle Game Over
+  if (data.winner && data.winner !== "") {
+    showGameOver(data.winner);
+  }
+
+  if (data.lastDetectedRegion !== undefined) {
+    state.lastDetectedRegion = data.lastDetectedRegion;
+    state.lastDetectedTurn = data.lastDetectedTurn;
   }
   renderUnits();
   renderMapMarkers();
@@ -415,7 +438,7 @@ async function selectUnit(unitID) {
 
   // Fetch available orders.
   try {
-    const res = await fetch(`${state.serverURL}/orders/available?unitId=${unitID}&playerId=${encodeURIComponent(state.playerID)}`);
+    const res = await fetch(`${state.serverURL}/orders/available?unitId=${unitID}&playerId=${encodeURIComponent(state.playerID)}`, { headers: { 'ngrok-skip-browser-warning': 'true' } });
     if (res.ok) {
       const data = await res.json();
       state.availableOrders = data.orders || [];
@@ -465,10 +488,10 @@ function onOrderTypeChange() {
     let options = connectedPaths.map(p => {
       const nextRegId = p.from === u.currentRegion ? p.to : p.from;
       const nextRegName = ALL_REGIONS.find(r => r.id === nextRegId)?.name || nextRegId;
-      return `<option value="${p.id}">➡️ ${nextRegName}</option>`;
+      return `<option value="${p.id}">➡️ ${nextRegName} (${p.id})</option>`;
     }).join('');
     if (connectedPaths.length === 0) {
-      options = ALL_PATHS.map(p => `<option value="${p.id}">${p.id}</option>`).join('');
+      options = `<option value="" disabled>No valid adjacent paths from here.</option>`;
     }
     params.innerHTML = `
       <div class="form-group">
@@ -486,18 +509,26 @@ function onOrderTypeChange() {
     }
     let options = "";
     if (maiaAbilityPaths.length > 0) {
-      options = maiaAbilityPaths.map(pid => {
-        const path = ALL_PATHS.find(p => p.id === pid) || { from: "?", to: "?" };
-        const nextRegId = path.from === u.currentRegion ? path.to : path.from;
-        const nextRegName = ALL_REGIONS.find(r => r.id === nextRegId)?.name || nextRegId;
-        return `<option value="${pid}">➡️ ${nextRegName} (${pid})</option>`;
-      }).join('');
+      // Saruman: must be in maiaAbilityPaths AND connected to currentRegion
+      options = maiaAbilityPaths.map(pid => ALL_PATHS.find(p => p.id === pid))
+        .filter(p => p && (p.from === u.currentRegion || p.to === u.currentRegion))
+        .map(p => {
+          const nextRegId = p.from === u.currentRegion ? p.to : p.from;
+          const nextRegName = ALL_REGIONS.find(r => r.id === nextRegId)?.name || nextRegId;
+          return `<option value="${p.id}">➡️ ${nextRegName} (${p.id})</option>`;
+        }).join('');
     } else {
-      options = ALL_PATHS.map(p => {
-        const nextRegId = p.from === u.currentRegion ? p.to : p.from;
-        const nextRegName = ALL_REGIONS.find(r => r.id === nextRegId)?.name || nextRegId;
-        return `<option value="${p.id}">➡️ ${nextRegName} (${p.id})</option>`;
-      }).join('');
+      // Gandalf: any path connected to currentRegion
+      options = ALL_PATHS.filter(p => p.from === u.currentRegion || p.to === u.currentRegion)
+        .map(p => {
+          const nextRegId = p.from === u.currentRegion ? p.to : p.from;
+          const nextRegName = ALL_REGIONS.find(r => r.id === nextRegId)?.name || nextRegId;
+          return `<option value="${p.id}">➡️ ${nextRegName} (${p.id})</option>`;
+        }).join('');
+    }
+
+    if (!options) {
+      options = `<option value="" disabled>No valid adjacent paths from here.</option>`;
     }
     params.innerHTML = `
       <div class="form-group">
@@ -648,7 +679,14 @@ function currentRouteTip() {
 function updateRouteBuilder(hiddenId) {
   // Refresh the dropdown of next-step options based on the tip of the built chain.
   const tip = currentRouteTip();
-  const adj = getAdjacentPaths(tip);
+  let adj = getAdjacentPaths(tip);
+  
+  // Exclude BLOCKED paths from route options
+  adj = adj.filter(a => {
+    const pState = state.paths[a.pathId];
+    return !(pState && pState.status === 'BLOCKED');
+  });
+
   const sel = document.getElementById('route-next-step');
   if (sel) {
     sel.innerHTML = `<option value="" disabled selected>Add step from ${friendlyRegion(tip)}…</option>` +
@@ -728,7 +766,7 @@ async function submitOrder() {
   try {
     const res = await fetch(`${state.serverURL}/order`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
       body: JSON.stringify(order),
     });
 
@@ -782,7 +820,7 @@ async function requestFastForward() {
   try {
     await fetch(`${state.serverURL}/game/fast-forward`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
       body: JSON.stringify({ playerId: state.playerID, turn: state.turn })
     });
     showToast("Fast forward requested. Waiting for opponent...", "info");
@@ -825,7 +863,7 @@ async function requestAnalysis() {
   const endpoint = state.side === 'light' ? '/analysis/routes' : '/analysis/intercept';
 
   try {
-    const res = await fetch(`${state.serverURL}${endpoint}?playerId=${encodeURIComponent(state.playerID)}`);
+    const res = await fetch(`${state.serverURL}${endpoint}?playerId=${encodeURIComponent(state.playerID)}`, { headers: { 'ngrok-skip-browser-warning': 'true' } });
     const data = await res.json();
     renderAnalysis(data);
   } catch {
@@ -979,6 +1017,7 @@ function renderMapMarkers() {
 
   // Repaint the region controller-tint layer (subtle blue/red/grey under each region).
   renderRegionLayer();
+  renderPaths();
   // Action hints based on currently-selected own unit.
   renderActionHints();
   // Refresh the textual Action Plan if a unit is still selected.
@@ -1710,3 +1749,60 @@ document.addEventListener('DOMContentLoaded', () => {
   setupMapControls();
   autoFillServerURL();
 });
+
+function renderPaths() {
+  const mapSvg = document.getElementById('map-svg');
+  if (!mapSvg) return;
+  const svgDoc = mapSvg.contentDocument;
+  if (!svgDoc) return;
+
+  ALL_PATHS.forEach(p => {
+    const line = svgDoc.getElementById('path-' + p.id);
+    if (!line) return;
+    const pathState = state.paths[p.id] || {};
+    line.setAttribute('stroke', '#d4a85333');
+    line.setAttribute('stroke-dasharray', '6,4');
+    line.setAttribute('stroke-width', '1.5');
+    if (pathState.status === 'TEMPORARILY_OPEN') {
+      line.setAttribute('stroke', '#4a9eff');
+      line.setAttribute('stroke-dasharray', 'none');
+      line.setAttribute('stroke-width', '3');
+    } else if (pathState.status === 'BLOCKED' || pathState.status === 'CORRUPTED') {
+      line.setAttribute('stroke', '#ff4444');
+      line.setAttribute('stroke-dasharray', 'none');
+      line.setAttribute('stroke-width', '2');
+    } else if (pathState.surveillanceLevel > 0) {
+      line.setAttribute('stroke', '#ffb46f');
+      line.setAttribute('stroke-dasharray', 'none');
+      line.setAttribute('stroke-width', '2');
+    }
+  });
+}
+
+function showGameOver(winner) {
+  const overlay = document.getElementById('game-over-overlay');
+  const title = document.getElementById('game-over-title');
+  const subtitle = document.getElementById('game-over-subtitle');
+  if (!overlay || !title || !subtitle) return;
+
+  overlay.classList.remove('hidden');
+  
+  if (winner === "DRAW") {
+    title.textContent = "DRAW";
+    title.style.color = "#aaa";
+    subtitle.textContent = "The war ended in a stalemate.";
+  } else {
+    const isLightSide = state.playerID.startsWith('light-');
+    const playerWon = (isLightSide && winner === "FREE_PEOPLES") || (!isLightSide && winner === "SHADOW");
+    
+    if (playerWon) {
+      title.textContent = "VICTORY";
+      title.style.color = "var(--gold)";
+      subtitle.textContent = isLightSide ? "The Ring is destroyed. Middle-Earth is saved!" : "Middle-Earth has fallen to the Shadow.";
+    } else {
+      title.textContent = "DEFEAT";
+      title.style.color = "#e63946";
+      subtitle.textContent = isLightSide ? "The Ring was claimed. Middle-Earth has fallen." : "The Ring is destroyed. Your forces scatter.";
+    }
+  }
+}

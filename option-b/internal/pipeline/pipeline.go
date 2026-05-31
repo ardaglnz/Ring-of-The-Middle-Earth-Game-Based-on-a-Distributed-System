@@ -17,13 +17,13 @@ import (
 
 // RouteRisk computes the risk score for a candidate route.
 type RouteRisk struct {
-	PathIDs       []string
-	RegionIDs     []string // destination regions along the route
-	RiskScore     int
-	ThreatPaths   []string
-	BlockedPaths  []string
-	Recommended   bool
-	Warnings      []string
+	PathIDs      []string
+	RegionIDs    []string // destination regions along the route
+	RiskScore    int
+	ThreatPaths  []string
+	BlockedPaths []string
+	Recommended  bool
+	Warnings     []string
 }
 
 // RankedRouteList is the output of Pipeline 1.
@@ -34,12 +34,13 @@ type RankedRouteList struct {
 }
 
 // ComputeRouteRisk computes the route risk formula from Section 32:
-//   riskScore =
-//       sum(region.threatLevel for each destination region)
-//     + sum(path.surveillanceLevel for each path) * 3
-//     + count(BLOCKED paths)    * 5
-//     + count(THREATENED paths) * 2
-//     + nazgulProximityCount    * 2
+//
+//	riskScore =
+//	    sum(region.threatLevel for each destination region)
+//	  + sum(path.surveillanceLevel for each path) * 3
+//	  + count(BLOCKED paths)    * 5
+//	  + count(THREATENED paths) * 2
+//	  + nazgulProximityCount    * 2
 func ComputeRouteRisk(pathIDs []string, snap cache.WorldStateCache, g *graph.Graph) RouteRisk {
 	rr := RouteRisk{PathIDs: pathIDs}
 
@@ -182,9 +183,9 @@ func sortByRisk(routes []RouteRisk) {
 
 // InterceptTask is one (Nazgul, route-candidate-region) pair.
 type InterceptTask struct {
-	NazgulID     string
-	NazgulRegion string
-	RouteRegion  string
+	NazgulID       string
+	NazgulRegion   string
+	RouteRegion    string
 	RBTurnsToReach int
 	RouteLength    int
 }
@@ -202,9 +203,10 @@ type InterceptPlan struct {
 }
 
 // ComputeIntercept calculates one (Nazgul, region) intercept score per Section 33:
-//   turnsToIntercept = graph.shortestPath(nazgul.region, routeRegion)
-//   interceptWindow  = rbTurnsToReach - turnsToIntercept
-//   score = interceptWindow >= 0 ? 1.0 - (turnsToIntercept / routeLength) : 0.0
+//
+//	turnsToIntercept = graph.shortestPath(nazgul.region, routeRegion)
+//	interceptWindow  = rbTurnsToReach - turnsToIntercept
+//	score = interceptWindow >= 0 ? 1.0 - (turnsToIntercept / routeLength) : 0.0
 func ComputeIntercept(task InterceptTask, g *graph.Graph) InterceptResult {
 	turnsToIntercept := g.ShortestPath(task.NazgulRegion, task.RouteRegion)
 	interceptWindow := task.RBTurnsToReach - turnsToIntercept

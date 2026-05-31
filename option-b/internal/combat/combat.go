@@ -24,10 +24,10 @@ type RegionState struct {
 
 // CombatResult is the output of ResolveCombat.
 type CombatResult struct {
-	AttackerWon    bool
-	Damage         int   // inflicted on losers
-	AttackerPower  int
-	DefenderPower  int
+	AttackerWon   bool
+	Damage        int // inflicted on losers
+	AttackerPower int
+	DefenderPower int
 	// UpdatedAttackers and UpdatedDefenders have updated Strength values.
 	UpdatedAttackers []UnitSnapshot
 	UpdatedDefenders []UnitSnapshot
@@ -89,7 +89,15 @@ func ResolveCombat(attackers, defenders []UnitSnapshot, region RegionState) Comb
 		// Defender holds — each attacker loses 1 strength.
 		result.AttackerWon = false
 		result.Damage = 1
-		result.UpdatedAttackers = applyDamage(effAttackers, 1)
+		
+		updatedAttackers := make([]UnitSnapshot, len(effAttackers))
+		for i, a := range effAttackers {
+			// Apply 1 damage to EACH attacker individually.
+			updated := applyDamage([]UnitSnapshot{a}, 1)
+			updatedAttackers[i] = updated[0]
+		}
+		
+		result.UpdatedAttackers = updatedAttackers
 		result.UpdatedDefenders = effDefenders
 	}
 

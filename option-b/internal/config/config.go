@@ -57,10 +57,10 @@ type UnitConfig struct {
 
 // GameConfig holds top-level game settings.
 type GameConfig struct {
-	HiddenUntilTurn    int
-	MaxTurns           int
+	HiddenUntilTurn     int
+	MaxTurns            int
 	TurnDurationSeconds int
-	Units              map[string]UnitConfig // key = unit ID
+	Units               map[string]UnitConfig // key = unit ID
 }
 
 // ----- Map Config -----
@@ -69,22 +69,22 @@ type GameConfig struct {
 type Terrain string
 
 const (
-	TerrainPlains   Terrain = "PLAINS"
+	TerrainPlains    Terrain = "PLAINS"
 	TerrainMountains Terrain = "MOUNTAINS"
-	TerrainForest   Terrain = "FOREST"
-	TerrainFortress Terrain = "FORTRESS"
-	TerrainVolcanic Terrain = "VOLCANIC"
-	TerrainSwamp    Terrain = "SWAMP"
+	TerrainForest    Terrain = "FOREST"
+	TerrainFortress  Terrain = "FORTRESS"
+	TerrainVolcanic  Terrain = "VOLCANIC"
+	TerrainSwamp     Terrain = "SWAMP"
 )
 
 // SpecialRole of a region.
 type SpecialRole string
 
 const (
-	RoleNone               SpecialRole = "NONE"
-	RoleRingBearerStart    SpecialRole = "RING_BEARER_START"
+	RoleNone                SpecialRole = "NONE"
+	RoleRingBearerStart     SpecialRole = "RING_BEARER_START"
 	RoleRingDestructionSite SpecialRole = "RING_DESTRUCTION_SITE"
-	RoleShadowStronghold   SpecialRole = "SHADOW_STRONGHOLD"
+	RoleShadowStronghold    SpecialRole = "SHADOW_STRONGHOLD"
 )
 
 // Controller of a region.

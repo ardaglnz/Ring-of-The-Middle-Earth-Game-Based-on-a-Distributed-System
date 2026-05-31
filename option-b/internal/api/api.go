@@ -1,8 +1,16 @@
 // Package api implements the HTTP REST API and SSE server from Section 34.
 // The select loop in Run() handles all 7 required cases (Section 31).
+//
+// FIX: pendingOrders and fastForwardVotes were instance-local, causing orders
+// to be lost when nginx round-robined requests across go-1/go-2/go-3.
+// Solution:
+//   - /order and /game/fast-forward are pinned to go-1 via nginx (coordinator pattern).
+//   - broadcastWorldState() pushes state to peer instances so all SSE clients
+//     receive updates regardless of which instance they connected to.
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -47,25 +55,35 @@ type Server struct {
 	signalCh   chan os.Signal
 
 	// Pending orders for the current turn.
+	// These are only written on the coordinator instance (go-1).
+	// nginx pins /order requests to go-1 so this slice is always consistent.
 	pendingOrders []pendingOrder
 	orderMu       sync.Mutex
 
+	// Fast-forward votes. Also coordinator-only (pinned via nginx).
 	fastForwardVotes map[string]int
 	ffMu             sync.Mutex
 	forceTurnCh      chan struct{}
+
+	// Peer instance addresses for cross-instance broadcast.
+	// Populated from PEER_ADDRS env var (comma-separated) or defaults.
+	peerAddrs []string
+
+	// httpClient reused for peer notifications.
+	httpClient *http.Client
 }
 
 type pendingOrder struct {
-	OrderType string          `json:"orderType"`
-	PlayerID  string          `json:"playerId"`
-	UnitID    string          `json:"unitId"`
-	Turn      int             `json:"turn"`
-	Payload   json.RawMessage `json:"payload,omitempty"`
-	PathIds   []string        `json:"pathIds,omitempty"`
-	NewPathIds []string       `json:"newPathIds,omitempty"`
-	PathId    string          `json:"pathId,omitempty"`
-	TargetRegion string       `json:"targetRegion,omitempty"`
-	TargetPathId string       `json:"targetPathId,omitempty"`
+	OrderType    string          `json:"orderType"`
+	PlayerID     string          `json:"playerId"`
+	UnitID       string          `json:"unitId"`
+	Turn         int             `json:"turn"`
+	Payload      json.RawMessage `json:"payload,omitempty"`
+	PathIds      []string        `json:"pathIds,omitempty"`
+	NewPathIds   []string        `json:"newPathIds,omitempty"`
+	PathId       string          `json:"pathId,omitempty"`
+	TargetRegion string          `json:"targetRegion,omitempty"`
+	TargetPathId string          `json:"targetPathId,omitempty"`
 }
 
 type sseConn struct {
@@ -79,12 +97,19 @@ type analysisReq struct {
 	resultCh chan interface{}
 }
 
+// internalBroadcastBody is the payload sent to /internal/broadcast on peer instances.
+type internalBroadcastBody struct {
+	Light    []byte `json:"light"`
+	Dark     []byte `json:"dark"`
+	RawCache []byte `json:"rawCache"`
+}
+
 // cors wraps an http.HandlerFunc with CORS headers.
 func cors(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
 			return
@@ -94,12 +119,15 @@ func cors(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // New creates a Server.
+// peerAddrs is a list of peer instance base URLs, e.g. ["http://go-2:8080", "http://go-3:8080"].
+// Pass nil or empty slice when running as a non-coordinator or in single-instance mode.
 func New(
 	c *cache.WorldStateCache,
 	g *graph.Graph,
 	gc *config.GameConfig,
 	lightSSE, darkSSE chan router.Event,
 	cacheUpd, engineCh chan router.Event,
+	peerAddrs []string,
 ) *Server {
 	return &Server{
 		cache:             c,
@@ -117,6 +145,8 @@ func New(
 		signalCh:          make(chan os.Signal, 1),
 		fastForwardVotes:  make(map[string]int),
 		forceTurnCh:       make(chan struct{}, 1),
+		peerAddrs:         peerAddrs,
+		httpClient:        &http.Client{Timeout: 3 * time.Second},
 	}
 }
 
@@ -131,6 +161,10 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/game/fast-forward", cors(s.handleFastForward))
 	mux.HandleFunc("/events", cors(s.handleSSE))
 	mux.HandleFunc("/health", cors(s.handleHealth))
+
+	// Internal endpoint: receives broadcast payloads pushed by the coordinator.
+	// Not exposed via nginx — only reachable by peer instances on the Docker network.
+	mux.HandleFunc("/internal/broadcast", s.handleInternalBroadcast)
 }
 
 // Run starts the main select loop (Section 31). All 7 cases handled.
@@ -167,12 +201,16 @@ func (s *Server) Run(ctx context.Context) {
 
 		// Case 6: Turn tick — process orders and broadcast state.
 		case <-s.turnTicker.C:
-			s.processTurnTick()
+			if os.Getenv("INSTANCE_ID") == "go-1" || os.Getenv("INSTANCE_ID") == "" {
+				s.processTurnTick()
+			}
 
-		// Case 6.5: Fast Forward forced tick
+		// Case 6.5: Fast Forward forced tick.
 		case <-s.forceTurnCh:
-			s.turnTicker.Reset(time.Duration(s.gameConfig.TurnDurationSeconds) * time.Second)
-			s.processTurnTick()
+			if os.Getenv("INSTANCE_ID") == "go-1" || os.Getenv("INSTANCE_ID") == "" {
+				s.turnTicker.Reset(time.Duration(s.gameConfig.TurnDurationSeconds) * time.Second)
+				s.processTurnTick()
+			}
 
 		// Case 7: OS signal — graceful shutdown.
 		case sig := <-s.signalCh:
@@ -246,26 +284,98 @@ func (s *Server) processTurnTick() {
 
 	log.Printf("[api] Processing turn %d with %d orders", snap.Turn, len(engineOrders))
 
-	// Build turn processor and run.
 	emitter := newEmitter(s)
 	tp := engine.New(s.cache, s.graph, s.gameConfig, emitter)
 	tp.ProcessTurn(engineOrders)
 
-	// Broadcast updated state to all SSE clients.
-	s.broadcastWorldState()
+	// Broadcast updated state to all SSE clients on this instance
+	// AND push to peer instances so their clients also receive the update.
+	s.broadcastWorldState(s.cache.Snapshot())
 }
 
-// broadcastWorldState sends the current WorldStateSnapshot to all connected SSE clients.
-func (s *Server) broadcastWorldState() {
-	snap := s.cache.Snapshot()
-
-	// Build light side state (includes ring bearer true region).
+// broadcastWorldState sends the current world state to:
+//  1. SSE clients connected to THIS instance.
+//  2. Peer instances via /internal/broadcast so their clients also get the update.
+func (s *Server) broadcastWorldState(snap cache.WorldStateCache) {
 	lightData := s.buildStateForSide(snap, true)
-	s.broadcastToClients(s.lightClients, lightData)
-
-	// Build dark side state (ring bearer region stripped).
 	darkData := s.buildStateForSide(snap, false)
+
+	// Deliver to clients on this instance.
+	s.broadcastToClients(s.lightClients, lightData)
 	s.broadcastToClients(s.darkClients, darkData)
+
+	// Push to peer instances in the background — non-blocking.
+	if len(s.peerAddrs) > 0 {
+		go s.notifyPeers(lightData, darkData, snap)
+	}
+}
+
+// notifyPeers pushes the current world state snapshot to all peer instances.
+// Called in a goroutine so it never blocks the select loop.
+func (s *Server) notifyPeers(lightData, darkData []byte, snap cache.WorldStateCache) {
+	rawCache, _ := json.Marshal(snap)
+	body, err := json.Marshal(internalBroadcastBody{
+		Light:    lightData,
+		Dark:     darkData,
+		RawCache: rawCache,
+	})
+	if err != nil {
+		log.Printf("[api] notifyPeers: marshal error: %v", err)
+		return
+	}
+
+	for _, addr := range s.peerAddrs {
+		url := addr + "/internal/broadcast"
+		resp, err := s.httpClient.Post(url, "application/json", bytes.NewReader(body))
+		if err != nil {
+			log.Printf("[api] notifyPeers: %s unreachable: %v", addr, err)
+			continue
+		}
+		resp.Body.Close()
+		log.Printf("[api] notifyPeers: pushed state to %s", addr)
+	}
+}
+
+// handleInternalBroadcast receives a world state snapshot from the coordinator
+// and delivers it to locally-connected SSE clients.
+// This endpoint is NOT exposed via nginx — only peer instances call it.
+func (s *Server) handleInternalBroadcast(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body internalBroadcastBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	if len(body.RawCache) > 0 {
+		var newSnap cache.WorldStateCache
+		if err := json.Unmarshal(body.RawCache, &newSnap); err == nil {
+			s.cache.Update(func(c *cache.WorldStateCache) {
+				c.Turn = newSnap.Turn
+				c.Units = newSnap.Units
+				c.Regions = newSnap.Regions
+				c.Paths = newSnap.Paths
+				c.LightView = newSnap.LightView
+				c.DarkView = newSnap.DarkView
+				c.RingBearer = newSnap.RingBearer
+				c.GameOver = newSnap.GameOver
+				c.Winner = newSnap.Winner
+			})
+		}
+	}
+
+	if len(body.Light) > 0 {
+		s.broadcastToClients(s.lightClients, body.Light)
+	}
+	if len(body.Dark) > 0 {
+		s.broadcastToClients(s.darkClients, body.Dark)
+	}
+
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) buildStateForSide(snap cache.WorldStateCache, isLight bool) []byte {
@@ -290,19 +400,28 @@ func (s *Server) buildStateForSide(snap cache.WorldStateCache, isLight bool) []b
 		SurveillanceLevel int    `json:"surveillanceLevel"`
 	}
 	type StateJ struct {
-		Turn    int       `json:"turn"`
-		Units   []UnitJ   `json:"units"`
-		Regions []RegionJ `json:"regions"`
-		Paths   []PathJ   `json:"paths"`
+		Turn               int       `json:"turn"`
+		Units              []UnitJ   `json:"units"`
+		Regions            []RegionJ `json:"regions"`
+		Paths              []PathJ   `json:"paths"`
+		TurnLogs           []string  `json:"turnLogs"`
+		LastDetectedRegion string    `json:"lastDetectedRegion,omitempty"`
+		LastDetectedTurn   int       `json:"lastDetectedTurn,omitempty"`
 	}
-	st := StateJ{Turn: snap.Turn}
+	st := StateJ{Turn: snap.Turn, TurnLogs: snap.TurnLogs}
+	
+	if !isLight {
+		st.LastDetectedRegion = snap.DarkView.LastDetectedRegion
+		st.LastDetectedTurn = snap.DarkView.LastDetectedTurn
+	}
+
 	for id, u := range snap.Units {
 		region := u.Region
 		if u.Config.Class == config.ClassRingBearer {
 			if isLight {
 				region = snap.RingBearer.TrueRegion
 			} else {
-				region = ""
+				region = "" // Dark Side NEVER receives true region.
 			}
 		}
 		st.Units = append(st.Units, UnitJ{
@@ -327,49 +446,90 @@ func (s *Server) buildStateForSide(snap cache.WorldStateCache, isLight bool) []b
 	return b
 }
 
-// Simple mock producer for local mode.
-type mockProd struct{}
-func (m *mockProd) Produce(topic string, key []byte, value []byte) error { return nil }
-func (m *mockProd) ProduceExactlyOnce(topic string, key []byte, value []byte) error { return nil }
-func (m *mockProd) Close() {}
+// ----- Emitter -----
 
-type localEmitter struct{ p engine.EventEmitter }
+type localEmitterImpl struct{ s *Server }
 
 func newEmitter(s *Server) engine.EventEmitter {
 	return &localEmitterImpl{s: s}
 }
 
-type localEmitterImpl struct{ s *Server }
-func (e *localEmitterImpl) EmitUnitEvent(t string, p interface{}) error { return nil }
+func (e *localEmitterImpl) EmitUnitEvent(t string, p interface{}) error   { return nil }
 func (e *localEmitterImpl) EmitRegionEvent(t string, p interface{}) error { return nil }
-func (e *localEmitterImpl) EmitPathEvent(t string, p interface{}) error { return nil }
-func (e *localEmitterImpl) EmitBroadcast(p interface{}) error { return nil }
+func (e *localEmitterImpl) EmitPathEvent(t string, p interface{}) error   { return nil }
+func (e *localEmitterImpl) EmitBroadcast(p interface{}) error             { return nil }
+
 func (e *localEmitterImpl) EmitRingPosition(p interface{}) error {
 	b, _ := json.Marshal(p)
 	e.s.broadcastToClients(e.s.lightClients, b)
+	// Also push to peers so the light-side client on any instance gets it.
+	if len(e.s.peerAddrs) > 0 {
+		go e.s.notifyPeersRingPosition(b)
+	}
 	return nil
 }
+
 func (e *localEmitterImpl) EmitRingDetection(id string, p interface{}) error {
 	b, _ := json.Marshal(p)
 	e.s.broadcastToClients(e.s.darkClients, b)
+	// Also push to peers so the dark-side client on any instance gets it.
+	if len(e.s.peerAddrs) > 0 {
+		go e.s.notifyPeersRingDetection(b)
+	}
 	return nil
 }
-func (e *localEmitterImpl) EmitGameOver(w, c string, t int) error { return nil }
+
+func (e *localEmitterImpl) EmitGameOver(w, c string, t int) error  { return nil }
 func (e *localEmitterImpl) EmitDLQ(ec, em string, rp []byte) error { return nil }
 
-func (s *Server) handleAnalysisRequest(req analysisReq) {
-	snap := s.cache.Snapshot()
-	if req.side == config.SideFreePeoples {
-		// Build candidate routes (the 4 canonical routes from Section 2.3).
-		routes := canonicalRoutes()
-		result := pipeline.RunPipeline1(context.Background(), routes, snap, s.graph)
-		req.resultCh <- result
-	} else {
-		regions := canonicalRouteRegions()
-		tasks := pipeline.BuildInterceptTasks(snap, regions, len(regions))
-		result := pipeline.RunPipeline2(context.Background(), tasks, snap, s.graph)
-		req.resultCh <- result
+// internalRingBody is used to push ring-specific events to peers.
+type internalRingBody struct {
+	Side    string `json:"side"` // "light" or "dark"
+	Payload []byte `json:"payload"`
+}
+
+// notifyPeersRingPosition pushes a RingBearerMoved event to peer instances (light side only).
+func (s *Server) notifyPeersRingPosition(payload []byte) {
+	body, _ := json.Marshal(internalRingBody{Side: "light", Payload: payload})
+	for _, addr := range s.peerAddrs {
+		resp, err := s.httpClient.Post(addr+"/internal/ring", "application/json", bytes.NewReader(body))
+		if err != nil {
+			continue
+		}
+		resp.Body.Close()
 	}
+}
+
+// notifyPeersRingDetection pushes a RingBearerDetected event to peer instances (dark side only).
+func (s *Server) notifyPeersRingDetection(payload []byte) {
+	body, _ := json.Marshal(internalRingBody{Side: "dark", Payload: payload})
+	for _, addr := range s.peerAddrs {
+		resp, err := s.httpClient.Post(addr+"/internal/ring", "application/json", bytes.NewReader(body))
+		if err != nil {
+			continue
+		}
+		resp.Body.Close()
+	}
+}
+
+// handleInternalRing receives ring-specific events (position or detection) from the coordinator.
+func (s *Server) handleInternalRing(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body internalRingBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	switch body.Side {
+	case "light":
+		s.broadcastToClients(s.lightClients, body.Payload)
+	case "dark":
+		s.broadcastToClients(s.darkClients, body.Payload)
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 // ----- HTTP Handlers -----
@@ -383,6 +543,7 @@ func (s *Server) handleGameStart(w http.ResponseWriter, r *http.Request) {
 		c.Turn = 1
 	})
 	log.Println("[api] Game started — HVH mode, turn 1")
+	s.broadcastWorldState(s.cache.Snapshot())
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "started", "mode": "HVH"})
 }
@@ -404,7 +565,7 @@ func (s *Server) handleFastForward(w http.ResponseWriter, r *http.Request) {
 	s.ffMu.Lock()
 	defer s.ffMu.Unlock()
 
-	// Clear old votes if the turn has advanced
+	// Clear stale votes if the turn has already advanced.
 	if s.cache.Turn > req.Turn {
 		s.fastForwardVotes = make(map[string]int)
 		w.WriteHeader(http.StatusOK)
@@ -413,7 +574,7 @@ func (s *Server) handleFastForward(w http.ResponseWriter, r *http.Request) {
 
 	s.fastForwardVotes[req.PlayerID] = req.Turn
 
-	// Check if both players voted for this turn
+	// Trigger fast-forward when both players have voted for this turn.
 	votes := 0
 	for _, t := range s.fastForwardVotes {
 		if t == req.Turn {
@@ -423,7 +584,7 @@ func (s *Server) handleFastForward(w http.ResponseWriter, r *http.Request) {
 
 	if votes >= 2 {
 		log.Printf("[api] Fast forward triggered for turn %d", req.Turn)
-		s.fastForwardVotes = make(map[string]int) // reset
+		s.fastForwardVotes = make(map[string]int)
 		select {
 		case s.forceTurnCh <- struct{}{}:
 		default:
@@ -445,7 +606,7 @@ func (s *Server) handleOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Lightweight pre-validation: PDF Section 11 rules 1, 2, 8.
+	// Lightweight pre-validation: Section 11 rules 1, 2, 8.
 	snap := s.cache.Snapshot()
 	playerSide := engine.PlayerSideFromID(order.PlayerID)
 
@@ -515,19 +676,18 @@ func (s *Server) handleGameState(w http.ResponseWriter, r *http.Request) {
 	}
 	type Out struct {
 		Turn    int         `json:"turn"`
+		Winner  string      `json:"winner"`
 		Units   []UnitOut   `json:"units"`
 		Regions []RegionOut `json:"regions"`
 		Paths   []PathOut   `json:"paths"`
 	}
 
-	// Determine player side from playerID prefix.
 	isLightSide := len(playerID) > 5 && playerID[:6] == "light-"
 
-	out := Out{Turn: snap.Turn}
+	out := Out{Turn: snap.Turn, Winner: snap.Winner}
 
 	for id, u := range snap.Units {
 		region := u.Region
-		// For RingBearer: light side sees true region from private state, dark side sees ""
 		if u.Config.Class == config.ClassRingBearer {
 			if isLightSide {
 				region = snap.RingBearer.TrueRegion
@@ -646,8 +806,14 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send an initial comment to trigger onopen on the client and flush headers
+	// Send an initial comment to trigger onopen on the client.
 	fmt.Fprintf(w, ": connected\n\n")
+	flusher.Flush()
+
+	// Send current state immediately so the client isn't blank on (re)connect.
+	snap := s.cache.Snapshot()
+	initialData := s.buildStateForSide(snap, side == config.SideFreePeoples)
+	fmt.Fprintf(w, "data: %s\n\n", initialData)
 	flusher.Flush()
 
 	ch := make(chan []byte, 32)
@@ -656,6 +822,9 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	defer func() { s.disconnectCh <- conn }()
 
 	ctx := r.Context()
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -666,6 +835,10 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 			}
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
+		case <-ticker.C:
+			// Send a keep-alive comment to prevent ngrok/nginx from dropping idle connections
+			fmt.Fprintf(w, ": keep-alive\n\n")
+			flusher.Flush()
 		}
 	}
 }
@@ -675,10 +848,22 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+func (s *Server) handleAnalysisRequest(req analysisReq) {
+	snap := s.cache.Snapshot()
+	if req.side == config.SideFreePeoples {
+		routes := canonicalRoutes()
+		result := pipeline.RunPipeline1(context.Background(), routes, snap, s.graph)
+		req.resultCh <- result
+	} else {
+		regions := canonicalRouteRegions()
+		tasks := pipeline.BuildInterceptTasks(snap, regions, len(regions))
+		result := pipeline.RunPipeline2(context.Background(), tasks, snap, s.graph)
+		req.resultCh <- result
+	}
+}
+
 // ----- Helpers -----
 
-// availableOrders returns legal orders for a unit (for the UI dropdown).
-// Config-driven: reads unit class and config fields, not unit ID strings.
 func availableOrders(u cache.UnitSnapshot, snap cache.WorldStateCache, playerID string) []string {
 	var orders []string
 	if u.Status != cache.UnitActive {
@@ -686,34 +871,22 @@ func availableOrders(u cache.UnitSnapshot, snap cache.WorldStateCache, playerID 
 	}
 	orders = append(orders, "ASSIGN_ROUTE", "REDIRECT_UNIT")
 
-	// Config-driven: Maia ability available if active, not on cooldown,
-	// and the unit is actually meant to dispatch (Sauron is passive only —
-	// detected by startRegion == "mordor" without hardcoding the unit id).
 	if u.Config.Maia && u.Cooldown == 0 && u.Status == cache.UnitActive && u.Config.StartRegion != "mordor" {
 		orders = append(orders, "MAIA_ABILITY")
 	}
-	// Config-driven: GondorArmy can fortify.
 	if u.Config.CanFortify {
 		orders = append(orders, "FORTIFY_REGION")
 	}
-	// PDF Section 5: BlockPath / SearchPath are not restricted to one side,
-	// but in practice are dark-side moves. Allow both sides to use them
-	// (the engine still enforces endpoint / side rules).
 	orders = append(orders, "BLOCK_PATH")
 	if u.Config.Side == config.SideShadow {
 		orders = append(orders, "SEARCH_PATH")
 	}
 
-	// Config-driven: RingBearer can submit DESTROY_RING whenever the route ends
-	// at mount-doom or it is currently there. Players need to submit the order
-	// the SAME turn the Ring Bearer arrives (Section 1.2), so we cannot wait
-	// until "already at mount-doom" — that would force a one-turn delay.
 	if u.Config.Class == config.ClassRingBearer {
 		rb := snap.RingBearer
 		if rb.TrueRegion == "mount-doom" {
 			orders = append(orders, "DESTROY_RING")
 		} else if len(rb.Route) > 0 && rb.RouteIdx < len(rb.Route) {
-			// If the very next path will land them on mount-doom, allow DESTROY_RING.
 			nextPath := rb.Route[rb.RouteIdx]
 			if path, ok := snap.Paths[nextPath]; ok {
 				if path.Config.To == "mount-doom" || path.Config.From == "mount-doom" {
@@ -727,29 +900,23 @@ func availableOrders(u cache.UnitSnapshot, snap cache.WorldStateCache, playerID 
 	return orders
 }
 
-// canonicalRoutes returns the 4 canonical ring bearer routes as path ID lists.
 func canonicalRoutes() [][]string {
 	return [][]string{
-		// Route 1 — Fellowship
 		{"shire-to-bree", "bree-to-weathertop", "weathertop-to-rivendell",
 			"rivendell-to-moria", "moria-to-lothlorien", "lothlorien-to-emyn-muil",
 			"emyn-muil-to-ithilien", "ithilien-to-cirith-ungol", "cirith-ungol-to-mount-doom"},
-		// Route 2 — Northern Bypass
 		{"shire-to-bree", "bree-to-rivendell", "rivendell-to-lothlorien",
 			"lothlorien-to-emyn-muil", "emyn-muil-to-dead-marshes",
 			"dead-marshes-to-ithilien", "ithilien-to-cirith-ungol", "cirith-ungol-to-mount-doom"},
-		// Route 3 — Dark Route
 		{"shire-to-bree", "bree-to-rivendell", "rivendell-to-lothlorien",
 			"lothlorien-to-emyn-muil", "emyn-muil-to-dead-marshes",
 			"dead-marshes-to-mordor", "mordor-to-mount-doom"},
-		// Route 4 — Southern Corridor
 		{"shire-to-tharbad", "tharbad-to-fords-of-isen", "fords-of-isen-to-edoras",
 			"edoras-to-minas-tirith", "minas-tirith-to-osgiliath",
 			"osgiliath-to-minas-morgul", "minas-morgul-to-cirith-ungol", "cirith-ungol-to-mount-doom"},
 	}
 }
 
-// canonicalRouteRegions returns distinct regions across all 4 canonical routes.
 func canonicalRouteRegions() []string {
 	return []string{
 		"bree", "weathertop", "rivendell", "moria", "lothlorien",

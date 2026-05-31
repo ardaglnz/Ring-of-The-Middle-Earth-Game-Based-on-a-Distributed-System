@@ -25,26 +25,27 @@ import (
 
 type noopEmitter struct{}
 
-func (n *noopEmitter) EmitUnitEvent(t string, p interface{}) error          { return nil }
-func (n *noopEmitter) EmitRegionEvent(t string, p interface{}) error        { return nil }
-func (n *noopEmitter) EmitPathEvent(t string, p interface{}) error          { return nil }
-func (n *noopEmitter) EmitBroadcast(p interface{}) error                    { return nil }
-func (n *noopEmitter) EmitRingPosition(p interface{}) error                 { return nil }
-func (n *noopEmitter) EmitRingDetection(id string, p interface{}) error     { return nil }
-func (n *noopEmitter) EmitGameOver(w, c string, t int) error                { return nil }
-func (n *noopEmitter) EmitDLQ(ec, em string, rp []byte) error               { return nil }
+func (n *noopEmitter) EmitUnitEvent(t string, p interface{}) error      { return nil }
+func (n *noopEmitter) EmitRegionEvent(t string, p interface{}) error    { return nil }
+func (n *noopEmitter) EmitPathEvent(t string, p interface{}) error      { return nil }
+func (n *noopEmitter) EmitBroadcast(p interface{}) error                { return nil }
+func (n *noopEmitter) EmitRingPosition(p interface{}) error             { return nil }
+func (n *noopEmitter) EmitRingDetection(id string, p interface{}) error { return nil }
+func (n *noopEmitter) EmitGameOver(w, c string, t int) error            { return nil }
+func (n *noopEmitter) EmitDLQ(ec, em string, rp []byte) error           { return nil }
 
 // buildMiniWorld constructs a small two-region world used by most engine tests.
-//   shire --(p1)-- bree --(p2)-- weathertop --(p3)-- mount-doom
+//
+//	shire --(p1)-- bree --(p2)-- weathertop --(p3)-- mount-doom
 func buildMiniWorld() (*cache.WorldStateCache, *graph.Graph, *config.GameConfig) {
 	mc := &config.MapConfig{
 		Regions: map[string]config.RegionConfig{
-			"shire":       {ID: "shire", Terrain: config.TerrainPlains, StartControl: config.ControlFreePeoples},
-			"bree":        {ID: "bree", Terrain: config.TerrainPlains, StartControl: config.ControlNeutral, StartThreat: 1},
-			"weathertop":  {ID: "weathertop", Terrain: config.TerrainMountains, StartControl: config.ControlNeutral, StartThreat: 2},
-			"mount-doom":  {ID: "mount-doom", Terrain: config.TerrainVolcanic, StartControl: config.ControlShadow, StartThreat: 5},
+			"shire":        {ID: "shire", Terrain: config.TerrainPlains, StartControl: config.ControlFreePeoples},
+			"bree":         {ID: "bree", Terrain: config.TerrainPlains, StartControl: config.ControlNeutral, StartThreat: 1},
+			"weathertop":   {ID: "weathertop", Terrain: config.TerrainMountains, StartControl: config.ControlNeutral, StartThreat: 2},
+			"mount-doom":   {ID: "mount-doom", Terrain: config.TerrainVolcanic, StartControl: config.ControlShadow, StartThreat: 5},
 			"minas-morgul": {ID: "minas-morgul", Terrain: config.TerrainFortress, StartControl: config.ControlShadow, StartThreat: 4},
-			"mordor":      {ID: "mordor", Terrain: config.TerrainVolcanic, StartControl: config.ControlShadow, StartThreat: 5},
+			"mordor":       {ID: "mordor", Terrain: config.TerrainVolcanic, StartControl: config.ControlShadow, StartThreat: 5},
 		},
 		Paths: map[string]config.PathConfig{
 			"p1": {ID: "p1", From: "shire", To: "bree", Cost: 1},
@@ -123,8 +124,8 @@ func TestEngine_AutoAdvanceRejectsInvalidEndpoint(t *testing.T) {
 
 	snap := c.Snapshot()
 	rb := snap.Units["ring-bearer"]
-	if rb.Region != "shire" {
-		t.Errorf("Ring Bearer should stay at shire when route has invalid first path, got %q", rb.Region)
+	if rb.Region != "" {
+		t.Errorf("Ring Bearer public region should stay empty, got %q", rb.Region)
 	}
 	if snap.RingBearer.TrueRegion != "shire" {
 		t.Errorf("RingBearer.TrueRegion should remain shire, got %q", snap.RingBearer.TrueRegion)
@@ -166,8 +167,8 @@ func TestEngine_SearchPathRequiresEndpoint(t *testing.T) {
 	}
 }
 
-// 5. FellowshipGuard at endpoint prevents Nazgul block, but a guard's own
-//    BlockPath order must not be blocked by *itself*.
+//  5. FellowshipGuard at endpoint prevents Nazgul block, but a guard's own
+//     BlockPath order must not be blocked by *itself*.
 func TestEngine_FellowshipGuardBlocksNazgulOnly(t *testing.T) {
 	c, g, gc := buildMiniWorld()
 	tp := engine.New(c, g, gc, &noopEmitter{})
@@ -332,5 +333,60 @@ func TestEngine_CombatFlowThroughEngine(t *testing.T) {
 	}
 	if a.Region != "bree" {
 		t.Errorf("expected Aragorn to remain at bree after repelled attack, got %q", a.Region)
+	}
+}
+
+// 10. Path Exposure Emits Detection
+func TestEngine_PathExposureEmitsDetection(t *testing.T) {
+	c, g, gc := buildMiniWorld()
+	tp := engine.New(c, g, gc, &noopEmitter{})
+
+	c.Update(func(c *cache.WorldStateCache) {
+		c.Turn = 5 // Past HiddenUntilTurn
+		p := c.Paths["p1"]
+		p.SurveillanceLevel = 1
+		c.Paths["p1"] = p
+
+		rb := c.Units["ring-bearer"]
+		rb.Route = []string{"p1"}
+		c.Units["ring-bearer"] = rb
+	})
+
+	tp.ProcessTurn(nil)
+	snap := c.Snapshot()
+	
+	// Check TurnLogs for RingBearerDetected
+	found := false
+	for _, log := range snap.TurnLogs {
+		if string(log) == "RingBearerDetected at bree" || string(log) == "RingBearerSpotted on path p1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected RingBearerDetected/Spotted in TurnLogs after crossing surveilled path")
+	}
+}
+
+// 11. Nazgul Deployment requires Shadow control
+func TestEngine_NazgulDeploymentChecksControl(t *testing.T) {
+	c, g, gc := buildMiniWorld()
+	tp := engine.New(c, g, gc, &noopEmitter{})
+
+	// weathertop is FREE_PEOPLES in buildMiniWorld
+	c.Update(func(c *cache.WorldStateCache) {
+		r := c.Regions["weathertop"]
+		r.ControlledBy = config.Controller("FREE_PEOPLES")
+		c.Regions["weathertop"] = r
+	})
+
+	tp.ProcessTurn([]engine.Order{
+		{UnitID: "nazgul-2", OrderType: engine.OrderDeployNazgul, Turn: 1,
+			Payload: payload(t, engine.AttackPayload{TargetRegion: "weathertop"})},
+	})
+
+	snap := c.Snapshot()
+	n2 := snap.Units["nazgul-2"]
+	if n2.Status == "ACTIVE" {
+		t.Errorf("expected Nazgul deployment to fail on Free Peoples region, but status is ACTIVE")
 	}
 }

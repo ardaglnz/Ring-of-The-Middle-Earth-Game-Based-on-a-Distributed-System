@@ -12,10 +12,11 @@ import (
 type PathStatus string
 
 const (
-	StatusOpen           PathStatus = "OPEN"
-	StatusThreatened     PathStatus = "THREATENED"
-	StatusBlocked        PathStatus = "BLOCKED"
+	StatusOpen            PathStatus = "OPEN"
+	StatusThreatened      PathStatus = "THREATENED"
+	StatusBlocked         PathStatus = "BLOCKED"
 	StatusTemporarilyOpen PathStatus = "TEMPORARILY_OPEN"
+	StatusCorrupted       PathStatus = "CORRUPTED"
 )
 
 // UnitStatus represents the lifecycle state of a unit.
@@ -31,11 +32,11 @@ const (
 type UnitSnapshot struct {
 	ID           string
 	Config       config.UnitConfig
-	Region       string     // always "" for ring-bearer in public state
+	Region       string // always "" for ring-bearer in public state
 	Strength     int
 	Status       UnitStatus
 	RespawnTurns int
-	Route        []string   // ordered list of path IDs
+	Route        []string // ordered list of path IDs
 	RouteIdx     int
 	Cooldown     int
 }
@@ -53,12 +54,12 @@ type RegionState struct {
 
 // PathState is the mutable runtime state of one path.
 type PathState struct {
-	ID               string
-	Config           config.PathConfig
-	Status           PathStatus
+	ID                string
+	Config            config.PathConfig
+	Status            PathStatus
 	SurveillanceLevel int
-	TempOpenTurns    int
-	BlockedByUnit    string // unit ID blocking the path, or ""
+	TempOpenTurns     int
+	BlockedByUnit     string // unit ID blocking the path, or ""
 }
 
 // RingBearerState is the private state of the Ring Bearer.
@@ -101,6 +102,7 @@ type WorldStateCache struct {
 	RingBearer  RingBearerState // private — never serialized to shared topics
 	GameOver    bool
 	Winner      string
+	TurnLogs    []string
 }
 
 // NewWorldStateCache initialises the cache from config.
@@ -165,12 +167,13 @@ func (c *WorldStateCache) Snapshot() WorldStateCache {
 	defer c.mu.RUnlock()
 
 	snap := WorldStateCache{
-		Turn:      c.Turn,
-		LightView: c.LightView,
-		DarkView:  c.DarkView,
-		GameOver:  c.GameOver,
-		Winner:    c.Winner,
+		Turn:       c.Turn,
+		LightView:  c.LightView,
+		DarkView:   c.DarkView,
+		GameOver:   c.GameOver,
+		Winner:     c.Winner,
 		RingBearer: c.RingBearer,
+		TurnLogs:   c.TurnLogs,
 	}
 
 	snap.Units = make(map[string]UnitSnapshot, len(c.Units))

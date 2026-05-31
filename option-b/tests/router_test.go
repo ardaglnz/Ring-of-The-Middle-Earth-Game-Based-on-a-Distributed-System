@@ -12,7 +12,8 @@ import (
 )
 
 // Case 1: WorldStateSnapshot with ring-bearer class set →
-//   Dark Side receives currentRegion="", Light Side receives real value.
+//
+//	Dark Side receives currentRegion="", Light Side receives real value.
 func TestRouter_StripRingBearer(t *testing.T) {
 	// Build a fake WorldStateSnapshot payload with ring-bearer having a real region.
 	payload := map[string]interface{}{

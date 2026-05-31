@@ -29,12 +29,13 @@ type DetectionResult struct {
 // Suppressed on turns 1 through hiddenUntilTurn.
 //
 // For each Nazgul (config.Class == ClassNazgul):
-//   range = config.DetectionRange
-//   if sauron.Region == "mordor" and sauron.Status == "ACTIVE":
-//     range += 1   (Eye of Sauron passive — config-driven, not hardcoded)
-//   if graph.BFSDistance(nazgul.Region, ringBearer.TrueRegion) <= range:
-//     exposed = true
-//     emit RingBearerDetected (Dark Side only)
+//
+//	range = config.DetectionRange
+//	if sauron.Region == "mordor" and sauron.Status == "ACTIVE":
+//	  range += 1   (Eye of Sauron passive — config-driven, not hardcoded)
+//	if graph.BFSDistance(nazgul.Region, ringBearer.TrueRegion) <= range:
+//	  exposed = true
+//	  emit RingBearerDetected (Dark Side only)
 func RunDetection(
 	units []UnitDetectionState,
 	ringBearerTrueRegion string,

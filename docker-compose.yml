@@ -1,7 +1,4 @@
-version: '3.8'
-
 # Ring of the Middle Earth — Docker Compose
-# Starts: 3 Kafka brokers, Zookeeper, Confluent Schema Registry, 3 Go game instances
 
 services:
 
@@ -95,7 +92,6 @@ services:
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
 
   # ---- Kafka Topic Initialiser ----
-  # Creates all 10 required topics with correct configs.
   kafka-init:
     image: confluentinc/cp-kafka:7.5.0
     container_name: kafka-init
@@ -119,7 +115,9 @@ services:
       kafka-topics --bootstrap-server kafka-1:29092 --describe
       "
 
-  # ---- Go Game Instance 1 ----
+  # ---- Go Game Instance 1 (coordinator) ----
+  # nginx pins /order, /game/start, /game/fast-forward to this instance.
+  # pendingOrders and fastForwardVotes live here only.
   go-1:
     build:
       context: ./option-b
@@ -134,6 +132,7 @@ services:
       SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
       CONFIG_DIR: "/app/config"
       INSTANCE_ID: "go-1"
+      PEER_ADDRS: "http://go-2:8080,http://go-3:8080"
     volumes:
       - ./config:/app/config:ro
 
@@ -152,6 +151,7 @@ services:
       SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
       CONFIG_DIR: "/app/config"
       INSTANCE_ID: "go-2"
+      PEER_ADDRS: "http://go-1:8080,http://go-3:8080"
     volumes:
       - ./config:/app/config:ro
 
@@ -170,10 +170,11 @@ services:
       SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
       CONFIG_DIR: "/app/config"
       INSTANCE_ID: "go-3"
+      PEER_ADDRS: "http://go-1:8080,http://go-2:8080"
     volumes:
       - ./config:/app/config:ro
 
-  # ---- nginx Load Balancer (optional, routes :80 → go-1/2/3) ----
+  # ---- nginx Load Balancer ----
   nginx:
     image: nginx:alpine
     container_name: nginx-lb

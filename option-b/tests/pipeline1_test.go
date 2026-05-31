@@ -33,7 +33,7 @@ func buildTestGraph() *graph.Graph {
 // buildTestCache creates a WorldStateCache for pipeline tests.
 func buildTestCache(pathStatuses map[string]cache.PathStatus, surveillanceLevels map[string]int) cache.WorldStateCache {
 	snap := cache.WorldStateCache{
-		Turn: 5,
+		Turn:  5,
 		Units: map[string]cache.UnitSnapshot{},
 		Regions: map[string]cache.RegionState{
 			"r1": {ID: "r1", Config: config.RegionConfig{Terrain: config.TerrainPlains}, ThreatLevel: 1},
@@ -68,10 +68,11 @@ func buildTestCache(pathStatuses map[string]cache.PathStatus, surveillanceLevels
 // regions visited: r2(threat=2), r3(threat=0), r4(threat=3)
 // surveillance: p1-2=2, p2-3=0, p3-4=1
 // expected:
-//   threat = 2+0+3 = 5
-//   surveillance = (2+0+1)*3 = 9
-//   no blocked/threatened paths
-//   total = 14
+//
+//	threat = 2+0+3 = 5
+//	surveillance = (2+0+1)*3 = 9
+//	no blocked/threatened paths
+//	total = 14
 func TestPipeline1_CorrectRiskScore(t *testing.T) {
 	g := buildTestGraph()
 	snap := buildTestCache(nil, map[string]int{"p1-2": 2, "p3-4": 1})

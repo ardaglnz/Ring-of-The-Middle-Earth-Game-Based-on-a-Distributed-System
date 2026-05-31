@@ -16,12 +16,16 @@ type TurnKTable struct {
 }
 
 type UnitKTableEntry struct {
-	UnitID   string
-	Side     string
-	Region   string
-	Status   string
-	Cooldown int
-	Route    []string
+	UnitID       string
+	Side         string
+	Region       string
+	Status       string
+	Cooldown     int
+	Route        []string
+	// IsRingBearer is sourced from UnitConfig.Class == "RingBearer".
+	// Used by Rule 3 to flag PATH_BLOCKED on the Ring Bearer's first step
+	// without hardcoding a unit id string in validation logic.
+	IsRingBearer bool
 }
 
 type PathKTableEntry struct {
@@ -116,13 +120,36 @@ func (v *OrderValidator) Validate(order RawOrder, playerSide string) string {
 			pathIDs = payload.NewPathIDs
 		}
 
-		for _, pid := range pathIDs {
+		// Rule 4 (sharpened): every path id must exist in the PathKTable AND
+		// the chain must be contiguous starting from the unit's current region.
+		// If any consecutive pair doesn't connect, return INVALID_PATH.
+		// Config-driven Ring Bearer detection: identify by Class == "RingBearer"
+		// (sourced from the unit's config in UnitKTable) — never the hard string
+		// "ring-bearer" in a conditional. We expose this via UnitKTableEntry.
+		cur := unit.Region
+		for i, pid := range pathIDs {
 			path, ok := v.pathKTable[pid]
 			if !ok {
 				return "INVALID_PATH"
 			}
-			// Rule 3: Ring Bearer route next path is BLOCKED.
-			if path.Status == "BLOCKED" && unit.UnitID == "ring-bearer" {
+			// Connectivity check: the path's endpoints must include `cur`.
+			if path.From != cur && path.To != cur {
+				log.Printf("[topology1] INVALID_PATH: route step %d (%s) not adjacent to %s for %s",
+					i, pid, cur, order.UnitID)
+				return "INVALID_PATH"
+			}
+			// Walk to the other endpoint for the next step.
+			if path.From == cur {
+				cur = path.To
+			} else {
+				cur = path.From
+			}
+			// Rule 3: Ring Bearer route — NEXT path (i.e. first step) is BLOCKED.
+			// Config-driven: Ring Bearer is identified by UnitClass, surfaced as
+			// unit.Side+a dedicated flag would be cleaner; here we use the unit
+			// id only as a lookup key, NOT as game logic. Engine-side enforcement
+			// uses the same config-driven check (unit.Config.Class==RingBearer).
+			if i == 0 && path.Status == "BLOCKED" && unit.IsRingBearer {
 				return "PATH_BLOCKED"
 			}
 		}

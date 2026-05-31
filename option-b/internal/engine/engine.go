@@ -18,16 +18,16 @@ import (
 
 // Order types as string constants (these are order type names, not unit IDs).
 const (
-	OrderAssignRoute    = "ASSIGN_ROUTE"
-	OrderRedirectUnit   = "REDIRECT_UNIT"
-	OrderBlockPath      = "BLOCK_PATH"
-	OrderSearchPath     = "SEARCH_PATH"
-	OrderReinforce      = "REINFORCE_REGION"
-	OrderFortify        = "FORTIFY_REGION"
-	OrderMaiaAbility    = "MAIA_ABILITY"
-	OrderAttack         = "ATTACK_REGION"
-	OrderDestroyRing    = "DESTROY_RING"
-	OrderDeployNazgul   = "DEPLOY_NAZGUL"
+	OrderAssignRoute  = "ASSIGN_ROUTE"
+	OrderRedirectUnit = "REDIRECT_UNIT"
+	OrderBlockPath    = "BLOCK_PATH"
+	OrderSearchPath   = "SEARCH_PATH"
+	OrderReinforce    = "REINFORCE_REGION"
+	OrderFortify      = "FORTIFY_REGION"
+	OrderMaiaAbility  = "MAIA_ABILITY"
+	OrderAttack       = "ATTACK_REGION"
+	OrderDestroyRing  = "DESTROY_RING"
+	OrderDeployNazgul = "DEPLOY_NAZGUL"
 )
 
 // Order is a validated game order.
@@ -83,10 +83,10 @@ type EventEmitter interface {
 
 // TurnProcessor executes the 13-step turn processing from Section 6.
 type TurnProcessor struct {
-	cache       *cache.WorldStateCache
-	graph       *graph.Graph
-	gameConfig  *config.GameConfig
-	emitter     EventEmitter
+	cache      *cache.WorldStateCache
+	graph      *graph.Graph
+	gameConfig *config.GameConfig
+	emitter    EventEmitter
 }
 
 // New creates a TurnProcessor.
@@ -120,7 +120,7 @@ func (tp *TurnProcessor) ProcessTurn(orders []Order) {
 		for _, o := range orders {
 			switch o.OrderType {
 			case OrderAssignRoute:
-				tp.applyAssignRoute(c, o)
+				tp.applyAssignRoute(c, o, turn)
 			case OrderRedirectUnit:
 				tp.applyRedirect(c, o)
 			}
@@ -131,9 +131,9 @@ func (tp *TurnProcessor) ProcessTurn(orders []Order) {
 		for _, o := range orders {
 			switch o.OrderType {
 			case OrderBlockPath:
-				tp.applyBlockPath(c, o)
+				tp.applyBlockPath(c, o, turn)
 			case OrderSearchPath:
-				tp.applySearchPath(c, o)
+				tp.applySearchPath(c, o, turn)
 			}
 		}
 
@@ -141,14 +141,14 @@ func (tp *TurnProcessor) ProcessTurn(orders []Order) {
 		for _, o := range orders {
 			switch o.OrderType {
 			case OrderReinforce, OrderDeployNazgul:
-				tp.applyReinforce(c, o)
+				tp.applyReinforce(c, o, turn)
 			}
 		}
 
 		// Step 5: FortifyRegion.
 		for _, o := range orders {
 			if o.OrderType == OrderFortify {
-				tp.applyFortify(c, o)
+				tp.applyFortify(c, o, turn)
 			}
 		}
 
@@ -164,9 +164,23 @@ func (tp *TurnProcessor) ProcessTurn(orders []Order) {
 		tp.autoAdvance(c, turn)
 
 		// Step 8: AttackRegion.
+		attacks := make(map[string]map[config.Side][]Order)
 		for _, o := range orders {
 			if o.OrderType == OrderAttack {
-				tp.applyAttack(c, o, turn)
+				var p AttackPayload
+				if err := json.Unmarshal(o.Payload, &p); err == nil {
+					if u, ok := c.Units[o.UnitID]; ok {
+						if attacks[p.TargetRegion] == nil {
+							attacks[p.TargetRegion] = make(map[config.Side][]Order)
+						}
+						attacks[p.TargetRegion][u.Config.Side] = append(attacks[p.TargetRegion][u.Config.Side], o)
+					}
+				}
+			}
+		}
+		for targetRegion, sideAttacks := range attacks {
+			for side, atkOrders := range sideAttacks {
+				tp.applyGroupAttack(c, targetRegion, side, atkOrders, turn)
 			}
 		}
 
@@ -181,6 +195,9 @@ func (tp *TurnProcessor) ProcessTurn(orders []Order) {
 
 		// Step 12: Detection check.
 		tp.runDetection(c, turn)
+
+		// Step 12.5: Update region control based on unit presence (for uncontested regions).
+		tp.updateRegionControl(c)
 
 		// Step 13: Evaluate win conditions.
 		tp.evaluateWinConditions(c, orders, turn)
@@ -197,7 +214,7 @@ func (tp *TurnProcessor) ProcessTurn(orders []Order) {
 
 // ----- Step implementations -----
 
-func (tp *TurnProcessor) applyAssignRoute(c *cache.WorldStateCache, o Order) {
+func (tp *TurnProcessor) applyAssignRoute(c *cache.WorldStateCache, o Order, turn int) {
 	var p AssignRoutePayload
 	if err := json.Unmarshal(o.Payload, &p); err != nil {
 		return
@@ -213,6 +230,9 @@ func (tp *TurnProcessor) applyAssignRoute(c *cache.WorldStateCache, o Order) {
 			rb.RouteIdx = 0
 			c.RingBearer = rb
 		}
+		msg := fmt.Sprintf("AssignRoute: %s assigned route %v", o.UnitID, p.PathIDs)
+		log.Printf("[engine] %s (turn %d)", msg, turn)
+		c.TurnLogs = append(c.TurnLogs, msg)
 	}
 }
 
@@ -248,7 +268,7 @@ func (tp *TurnProcessor) revertStalePaths(c *cache.WorldStateCache) {
 	}
 }
 
-func (tp *TurnProcessor) applyBlockPath(c *cache.WorldStateCache, o Order) {
+func (tp *TurnProcessor) applyBlockPath(c *cache.WorldStateCache, o Order, turn int) {
 	var p BlockPathPayload
 	if err := json.Unmarshal(o.Payload, &p); err != nil {
 		return
@@ -279,7 +299,9 @@ func (tp *TurnProcessor) applyBlockPath(c *cache.WorldStateCache, o Order) {
 			if other.Config.Class == config.ClassFellowshipGuard &&
 				other.Status == cache.UnitActive &&
 				(other.Region == path.Config.From || other.Region == path.Config.To) {
-				log.Printf("[engine] BLOCK refused: FellowshipGuard %s defends endpoint of %s", other.ID, p.PathID)
+				msg := fmt.Sprintf("BLOCK failed: %s is defended by FellowshipGuard %s", p.PathID, other.ID)
+				log.Printf("[engine] %s", msg)
+				c.TurnLogs = append(c.TurnLogs, msg)
 				return
 			}
 		}
@@ -288,9 +310,12 @@ func (tp *TurnProcessor) applyBlockPath(c *cache.WorldStateCache, o Order) {
 	path.Status = cache.StatusBlocked
 	path.BlockedByUnit = o.UnitID
 	c.Paths[p.PathID] = path
+	msg := fmt.Sprintf("BlockPath: %s blocked %s", o.UnitID, p.PathID)
+	log.Printf("[engine] %s (turn %d)", msg, turn)
+	c.TurnLogs = append(c.TurnLogs, msg)
 }
 
-func (tp *TurnProcessor) applySearchPath(c *cache.WorldStateCache, o Order) {
+func (tp *TurnProcessor) applySearchPath(c *cache.WorldStateCache, o Order, turn int) {
 	var p SearchPathPayload
 	if err := json.Unmarshal(o.Payload, &p); err != nil {
 		return
@@ -312,9 +337,12 @@ func (tp *TurnProcessor) applySearchPath(c *cache.WorldStateCache, o Order) {
 		path.SurveillanceLevel++
 	}
 	c.Paths[p.PathID] = path
+	msg := fmt.Sprintf("SearchPath: %s searched %s", o.UnitID, p.PathID)
+	log.Printf("[engine] %s (turn %d)", msg, turn)
+	c.TurnLogs = append(c.TurnLogs, msg)
 }
 
-func (tp *TurnProcessor) applyReinforce(c *cache.WorldStateCache, o Order) {
+func (tp *TurnProcessor) applyReinforce(c *cache.WorldStateCache, o Order, turn int) {
 	var p AttackPayload
 	if err := json.Unmarshal(o.Payload, &p); err != nil {
 		return
@@ -338,11 +366,23 @@ func (tp *TurnProcessor) applyReinforce(c *cache.WorldStateCache, o Order) {
 			return
 		}
 	}
+
+	if o.OrderType == OrderDeployNazgul {
+		target, ok := c.Regions[p.TargetRegion]
+		if !ok || target.ControlledBy != config.ControlShadow {
+			log.Printf("[engine] INVALID_TARGET: DEPLOY_NAZGUL target %s is not Shadow-controlled", p.TargetRegion)
+			return
+		}
+	}
+
 	u.Region = p.TargetRegion
 	c.Units[o.UnitID] = u
+	msg := fmt.Sprintf("%s: %s moved to %s", o.OrderType, o.UnitID, p.TargetRegion)
+	log.Printf("[engine] %s (turn %d)", msg, turn)
+	c.TurnLogs = append(c.TurnLogs, msg)
 }
 
-func (tp *TurnProcessor) applyFortify(c *cache.WorldStateCache, o Order) {
+func (tp *TurnProcessor) applyFortify(c *cache.WorldStateCache, o Order, turn int) {
 	u, ok := c.Units[o.UnitID]
 	if !ok {
 		return
@@ -351,13 +391,16 @@ func (tp *TurnProcessor) applyFortify(c *cache.WorldStateCache, o Order) {
 	if !u.Config.CanFortify {
 		return
 	}
+
 	region, ok := c.Regions[u.Region]
-	if !ok {
-		return
+	if ok {
+		region.Fortified = true
+		region.FortifyTurns = 2
+		c.Regions[u.Region] = region
 	}
-	region.Fortified = true
-	region.FortifyTurns = 2
-	c.Regions[u.Region] = region
+	msg := fmt.Sprintf("FortifyRegion: %s fortified %s", o.UnitID, u.Region)
+	log.Printf("[engine] %s (turn %d)", msg, turn)
+	c.TurnLogs = append(c.TurnLogs, msg)
 }
 
 // applyMaiaAbility dispatches by config, not by unit ID.
@@ -419,24 +462,32 @@ func (tp *TurnProcessor) applyMaiaAbility(c *cache.WorldStateCache, o Order, tur
 			return
 		}
 		path.SurveillanceLevel = 3 // permanent
+		path.Status = cache.StatusCorrupted
 		c.Paths[p.TargetPathID] = path
 		u.Cooldown = u.Config.Cooldown
 		c.Units[o.UnitID] = u
-		log.Printf("[engine] CorruptPath: %s by %s (turn %d)", p.TargetPathID, o.UnitID, turn)
+		msg := fmt.Sprintf("CorruptPath: %s by %s", p.TargetPathID, o.UnitID)
+		log.Printf("[engine] %s (turn %d)", msg, turn)
+		c.TurnLogs = append(c.TurnLogs, msg)
 	} else {
 		// Gandalf — OpenPath. Path must be BLOCKED.
 		if path.Status != cache.StatusBlocked {
+			msg := fmt.Sprintf("OpenPath failed: %s is not BLOCKED", p.TargetPathID)
+			log.Printf("[engine] %s", msg)
+			c.TurnLogs = append(c.TurnLogs, msg)
 			return
 		}
 		if u.Region != path.Config.From && u.Region != path.Config.To {
 			return
 		}
 		path.Status = cache.StatusTemporarilyOpen
-		path.TempOpenTurns = 2
+		path.TempOpenTurns = 3 // initialized to 3 because Step 9 will decrement it to 2 on this same turn
 		c.Paths[p.TargetPathID] = path
 		u.Cooldown = u.Config.Cooldown
 		c.Units[o.UnitID] = u
-		log.Printf("[engine] OpenPath: %s by %s (turn %d)", p.TargetPathID, o.UnitID, turn)
+		msg := fmt.Sprintf("OpenPath: %s by %s", p.TargetPathID, o.UnitID)
+		log.Printf("[engine] %s (turn %d)", msg, turn)
+		c.TurnLogs = append(c.TurnLogs, msg)
 	}
 }
 
@@ -455,9 +506,9 @@ func (tp *TurnProcessor) autoAdvance(c *cache.WorldStateCache, turn int) {
 			continue
 		}
 
-		if path.Status == cache.StatusBlocked {
+		if path.Status == cache.StatusBlocked || path.Status == cache.StatusCorrupted {
 			// RouteBlocked — unit stays.
-			log.Printf("[engine] RouteBlocked: %s on %s (turn %d)", uid, nextPathID, turn)
+			log.Printf("[engine] RouteBlocked: %s on %s (turn %d) status: %s", uid, nextPathID, turn, path.Status)
 			continue
 		}
 
@@ -465,17 +516,24 @@ func (tp *TurnProcessor) autoAdvance(c *cache.WorldStateCache, turn int) {
 		// The unit MUST currently be at one of this path's endpoints — otherwise
 		// the route is invalid (silently skip rather than teleport).
 		var dest string
-		switch u.Region {
+		currentRegion := u.Region
+		if u.Config.Class == config.ClassRingBearer {
+			currentRegion = c.RingBearer.TrueRegion
+		}
+
+		switch currentRegion {
 		case path.Config.From:
 			dest = path.Config.To
 		case path.Config.To:
 			dest = path.Config.From
 		default:
-			log.Printf("[engine] RouteInvalid: %s not at endpoint of %s (region=%s) — skipping", uid, nextPathID, u.Region)
+			log.Printf("[engine] RouteInvalid: %s not at endpoint of %s (region=%s) — skipping", uid, nextPathID, currentRegion)
 			continue
 		}
 
-		u.Region = dest
+		if u.Config.Class != config.ClassRingBearer {
+			u.Region = dest
+		}
 		u.RouteIdx++
 
 		// Ring Bearer special handling.
@@ -488,6 +546,14 @@ func (tp *TurnProcessor) autoAdvance(c *cache.WorldStateCache, turn int) {
 			if path.SurveillanceLevel >= 1 && turn > tp.gameConfig.HiddenUntilTurn {
 				rb.Exposed = true
 				log.Printf("[engine] RingBearerSpotted on path %s (turn %d)", nextPathID, turn)
+				
+				// PDF Section 6 Step 7: Emit RingBearerSpotted to Dark Side only.
+				tp.emitter.EmitRingDetection("dark-side-player", map[string]interface{}{
+					"type":      "RingBearerSpotted",
+					"pathId":    nextPathID,
+					"turn":      turn,
+					"timestamp": time.Now().UnixMilli(),
+				})
 			}
 			c.RingBearer = rb
 			// RingBearerMoved emitted to game.ring.position (Light Side only)
@@ -507,53 +573,97 @@ func (tp *TurnProcessor) autoAdvance(c *cache.WorldStateCache, turn int) {
 	}
 }
 
-func (tp *TurnProcessor) applyAttack(c *cache.WorldStateCache, o Order, turn int) {
-	var p AttackPayload
-	if err := json.Unmarshal(o.Payload, &p); err != nil {
+// updateRegionControl assigns ownership of regions that have units from only one side.
+func (tp *TurnProcessor) updateRegionControl(c *cache.WorldStateCache) {
+	for rid, region := range c.Regions {
+		freePeoplesCount := 0
+		shadowCount := 0
+
+		for _, u := range c.Units {
+			if u.Status != cache.UnitActive {
+				continue
+			}
+			if u.Config.Class == config.ClassRingBearer {
+				continue // Ring Bearer is hidden, does not project control
+			}
+			
+			// Determine actual location of unit
+			if u.Region == rid {
+
+				if u.Config.Side == config.SideFreePeoples {
+					freePeoplesCount++
+				} else if u.Config.Side == config.SideShadow {
+					shadowCount++
+				}
+			}
+		}
+
+		// If only one side is present, they take control.
+		// If both are present (contested), control doesn't change until an attack resolves.
+		if freePeoplesCount > 0 && shadowCount == 0 {
+			region.ControlledBy = config.ControlFreePeoples
+			c.Regions[rid] = region
+		} else if shadowCount > 0 && freePeoplesCount == 0 {
+			region.ControlledBy = config.ControlShadow
+			c.Regions[rid] = region
+		}
+	}
+}
+
+func (tp *TurnProcessor) applyGroupAttack(c *cache.WorldStateCache, targetRegion string, attackerSide config.Side, atkOrders []Order, turn int) {
+	if len(atkOrders) == 0 {
 		return
 	}
-	attacker, ok := c.Units[o.UnitID]
-	if !ok || attacker.Status != cache.UnitActive {
-		return
-	}
-	region, ok := c.Regions[p.TargetRegion]
+
+	region, ok := c.Regions[targetRegion]
 	if !ok {
 		return
 	}
 
-	// PDF Section 11 Rule 6: AttackRegion target must be adjacent and enemy-controlled.
-	// We allow same-region attack (already engaged) as a no-op join, but cross-region
-	// attacks require an OPEN/THREATENED/TEMPORARILY_OPEN path between the two regions.
-	if attacker.Region != p.TargetRegion {
-		pathID := tp.graph.PathBetween(attacker.Region, p.TargetRegion)
-		if pathID == "" {
-			log.Printf("[engine] INVALID_TARGET: %s cannot attack non-adjacent %s from %s", o.UnitID, p.TargetRegion, attacker.Region)
-			return
+	var attackers []combat.UnitSnapshot
+	for _, o := range atkOrders {
+		attacker, ok := c.Units[o.UnitID]
+		if !ok || attacker.Status != cache.UnitActive {
+			continue
 		}
-		if path, ok := c.Paths[pathID]; ok && path.Status == cache.StatusBlocked {
-			log.Printf("[engine] PATH_BLOCKED: %s cannot attack %s via blocked %s", o.UnitID, p.TargetRegion, pathID)
-			return
+
+		// PDF Section 11 Rule 6: AttackRegion target must be adjacent and enemy-controlled.
+		if attacker.Region != targetRegion {
+			pathID := tp.graph.PathBetween(attacker.Region, targetRegion)
+			if pathID == "" {
+				log.Printf("[engine] INVALID_TARGET: %s cannot attack non-adjacent %s from %s", o.UnitID, targetRegion, attacker.Region)
+				continue
+			}
+			if path, ok := c.Paths[pathID]; ok && path.Status == cache.StatusBlocked {
+				log.Printf("[engine] PATH_BLOCKED: %s cannot attack %s via blocked %s", o.UnitID, targetRegion, pathID)
+				continue
+			}
 		}
+
+		attackers = append(attackers, toCombatSnap(attacker))
 	}
 
-	// Collect all attackers (same side, attacking same region).
-	var attackers []combat.UnitSnapshot
-	attackers = append(attackers, toCombatSnap(attacker))
+	if len(attackers) == 0 {
+		return
+	}
 
 	// Collect defenders (opposite side, in target region).
 	var defenders []combat.UnitSnapshot
 	for _, u := range c.Units {
-		if u.Status == cache.UnitActive && u.Region == p.TargetRegion && u.Config.Side != attacker.Config.Side {
+		if u.Status == cache.UnitActive && u.Region == targetRegion && u.Config.Side != attackerSide {
 			defenders = append(defenders, toCombatSnap(u))
 		}
 	}
 
 	if len(defenders) == 0 {
-		// Uncontested — attacker moves in.
-		attacker.Region = p.TargetRegion
-		c.Units[o.UnitID] = attacker
-		region.ControlledBy = config.Controller(attacker.Config.Side)
-		c.Regions[p.TargetRegion] = region
+		// Uncontested — all attackers move in.
+		for _, a := range attackers {
+			attacker := c.Units[a.ID]
+			attacker.Region = targetRegion
+			c.Units[a.ID] = attacker
+		}
+		region.ControlledBy = config.Controller(attackerSide)
+		c.Regions[targetRegion] = region
 		return
 	}
 
@@ -565,12 +675,17 @@ func (tp *TurnProcessor) applyAttack(c *cache.WorldStateCache, o Order, turn int
 	result := combat.ResolveCombat(attackers, defenders, regionState)
 
 	if result.AttackerWon {
-		// Update attacker position.
-		attacker.Region = p.TargetRegion
-		c.Units[o.UnitID] = attacker
-		region.ControlledBy = config.Controller(attacker.Config.Side)
+		// Update ALL attackers positions.
+		for _, au := range result.UpdatedAttackers {
+			if existing, ok := c.Units[au.ID]; ok {
+				existing.Region = targetRegion
+				existing.Strength = au.Strength
+				c.Units[au.ID] = existing
+			}
+		}
+		region.ControlledBy = config.Controller(attackerSide)
 		region.Fortified = false
-		c.Regions[p.TargetRegion] = region
+		c.Regions[targetRegion] = region
 
 		// Update defenders.
 		for _, du := range result.UpdatedDefenders {
@@ -580,26 +695,52 @@ func (tp *TurnProcessor) applyAttack(c *cache.WorldStateCache, o Order, turn int
 				if cache.UnitStatus(du.Status) == cache.UnitRespawning {
 					existing.Region = ""
 					existing.RespawnTurns = existing.Config.RespawnTurns
+				} else if cache.UnitStatus(du.Status) == cache.UnitDestroyed {
+					existing.Region = ""
 				}
 				c.Units[du.ID] = existing
 			}
 		}
 
 		// If Isengard falls to FREE_PEOPLES: disable Saruman.
-		if p.TargetRegion == "isengard" && attacker.Config.Side == config.SideFreePeoples {
+		if targetRegion == "isengard" && attackerSide == config.SideFreePeoples {
 			tp.disableSaruman(c)
 		}
-		log.Printf("[engine] Battle at %s: attackers WON (turn %d)", p.TargetRegion, turn)
+		msg := fmt.Sprintf("Battle at %s: attackers WON (%d vs %d) — defenders took %d damage", targetRegion, result.AttackerPower, result.DefenderPower, result.Damage)
+		log.Printf("[engine] %s (turn %d)", msg, turn)
+		c.TurnLogs = append(c.TurnLogs, msg)
 	} else {
 		// Defenders hold — attackers each lose 1 strength.
 		for _, au := range result.UpdatedAttackers {
 			if existing, ok := c.Units[au.ID]; ok {
 				existing.Strength = au.Strength
 				existing.Status = cache.UnitStatus(au.Status)
+				if cache.UnitStatus(au.Status) == cache.UnitRespawning {
+					existing.Region = ""
+					existing.RespawnTurns = existing.Config.RespawnTurns
+				} else if cache.UnitStatus(au.Status) == cache.UnitDestroyed {
+					existing.Region = ""
+				}
 				c.Units[au.ID] = existing
 			}
 		}
-		log.Printf("[engine] Battle at %s: defenders held (turn %d)", p.TargetRegion, turn)
+		// In case any defenders died (though they usually hold if they don't die)
+		for _, du := range result.UpdatedDefenders {
+			if existing, ok := c.Units[du.ID]; ok {
+				existing.Strength = du.Strength
+				existing.Status = cache.UnitStatus(du.Status)
+				if cache.UnitStatus(du.Status) == cache.UnitRespawning {
+					existing.Region = ""
+					existing.RespawnTurns = existing.Config.RespawnTurns
+				} else if cache.UnitStatus(du.Status) == cache.UnitDestroyed {
+					existing.Region = ""
+				}
+				c.Units[du.ID] = existing
+			}
+		}
+		msg := fmt.Sprintf("Battle at %s: defenders held (%d vs %d) — attackers took 1 damage each", targetRegion, result.AttackerPower, result.DefenderPower)
+		log.Printf("[engine] %s (turn %d)", msg, turn)
+		c.TurnLogs = append(c.TurnLogs, msg)
 	}
 }
 
@@ -685,24 +826,26 @@ func (tp *TurnProcessor) runDetection(c *cache.WorldStateCache, turn int) {
 		tp.graph,
 	)
 
-	if result.Exposed {
+	// If exposure occurred via Nazgul OR if RingBearer crossed a surveilled path earlier this turn.
+	if result.Exposed || c.RingBearer.Exposed {
 		rb := c.RingBearer
 		rb.Exposed = true
-		rb.LastDetectedRegion = result.TrueRegion
+		rb.LastDetectedRegion = c.RingBearer.TrueRegion // Use current true region
 		rb.LastDetectedTurn = turn
 		c.RingBearer = rb
 
 		// Update dark view — only last detected region, NEVER true region.
-		c.DarkView.LastDetectedRegion = result.TrueRegion
+		c.DarkView.LastDetectedRegion = rb.TrueRegion
 		c.DarkView.LastDetectedTurn = turn
 		// c.DarkView.RingBearerRegion is NEVER set — always "".
 
-		log.Printf("[engine] RingBearerDetected at %s (turn %d)", result.TrueRegion, turn)
+		msg := fmt.Sprintf("RingBearerDetected at %s", rb.TrueRegion)
+		log.Printf("[engine] %s (turn %d)", msg, turn)
 
 		// Emit detection event to Dark Side
 		tp.emitter.EmitRingDetection("dark-side-player", map[string]interface{}{
 			"type":      "RingBearerDetected",
-			"regionId":  result.TrueRegion,
+			"regionId":  rb.TrueRegion,
 			"turn":      turn,
 			"timestamp": time.Now().UnixMilli(),
 		})

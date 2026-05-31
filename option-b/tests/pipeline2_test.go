@@ -48,7 +48,7 @@ func TestPipeline2_NegativeInterceptWindow(t *testing.T) {
 		NazgulID:       "nazgul-2",
 		NazgulRegion:   "r4", // far away from r1
 		RouteRegion:    "r1",
-		RBTurnsToReach: 2,    // ring bearer gets there in 2 turns
+		RBTurnsToReach: 2, // ring bearer gets there in 2 turns
 		RouteLength:    10,
 	}
 
